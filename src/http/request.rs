@@ -17,6 +17,7 @@ pub struct HttpRequest {
     pub version: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    pub query: String,
 }
 
 impl HttpRequest {
@@ -45,8 +46,17 @@ impl HttpRequest {
             other => HttpMethod::Unsupported(other.to_string()),
         };
 
-        let path = parts[1].to_string();
+        let target = parts[1];
+
+        // Split into path + query
+        let (path, query) = if let Some(pos) = target.find('?') {
+            (target[..pos].to_string(), target[pos + 1..].to_string())
+        } else {
+            (target.to_string(), String::new())
+        };
+
         let version = parts[2].to_string();
+
 
         if version != "HTTP/1.0" {
             return Err(ServerError::BadRequest(format!(
@@ -90,6 +100,7 @@ impl HttpRequest {
             version,
             headers,
             body,
+            query
         })
     }
 }
