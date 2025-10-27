@@ -18,4 +18,6 @@ pub mod io {
     pub mod sortfile;
     pub mod wordcount;
     pub mod grep;
+    pub mod compress;
+    pub mod hash_file;
 }
