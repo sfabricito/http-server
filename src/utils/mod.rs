@@ -10,4 +10,5 @@ pub mod commands;
 pub mod cpu {
     pub mod is_prime;
     pub mod factor;
+    pub mod mandelbrot;
 }
