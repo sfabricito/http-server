@@ -9,4 +9,5 @@ pub mod commands;
 // cpu intensive utilities
 pub mod cpu {
     pub mod is_prime;
+    pub mod factor;
 }

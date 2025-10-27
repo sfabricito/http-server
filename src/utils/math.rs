@@ -21,12 +21,12 @@ pub fn random(count: usize, min: i32, max: i32) -> Vec<i32> {
 }
 
 #[inline]
-fn mul_mod_u128(a: u128, b: u128, m: u128) -> u128 {
+pub fn mul_mod_u128(a: u128, b: u128, m: u128) -> u128 {
     ((a % m) * (b % m)) % m
 }
 
 #[inline]
-fn pow_mod_u128(mut a: u128, mut e: u128, m: u128) -> u128 {
+pub fn pow_mod_u128(mut a: u128, mut e: u128, m: u128) -> u128 {
     let mut r: u128 = 1 % m;
     a %= m;
     while e > 0 {
@@ -38,12 +38,12 @@ fn pow_mod_u128(mut a: u128, mut e: u128, m: u128) -> u128 {
 }
 
 #[inline]
-pub(crate) fn mul_mod_u64(a: u64, b: u64, m: u64) -> u64 {
+pub fn mul_mod_u64(a: u64, b: u64, m: u64) -> u64 {
     ((a as u128 * b as u128) % m as u128) as u64
 }
 
 #[inline]
-pub(crate) fn pow_mod_u64(mut a: u64, mut e: u64, m: u64) -> u64 {
+pub fn pow_mod_u64(mut a: u64, mut e: u64, m: u64) -> u64 {
     let mut r: u64 = 1 % m;
     a %= m;
     while e > 0 {
