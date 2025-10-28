@@ -11,7 +11,7 @@ pub struct WcCounts {
     pub bytes: u64,
 }
 
-pub fn wordcount(name: &str) -> io::Result<(WcCounts, u128, PathBuf)> {
+pub fn word_count(name: &str) -> io::Result<(WcCounts, u128, PathBuf)> {
     let base = env::var("FILE_STORAGE_PATH").unwrap_or_else(|_| "./data/files".to_string());
     let path = PathBuf::from(base).join(name);
 
@@ -51,7 +51,7 @@ pub fn wordcount(name: &str) -> io::Result<(WcCounts, u128, PathBuf)> {
 }
 
 pub fn wordcount_json(name: &str) -> String {
-    match wordcount(name) {
+    match word_count(name) {
         Ok((c, elapsed, path)) => {
             format!(
                 r#"{{"file":"{}","lines":{},"words":{},"bytes":{},"elapsed_ms":{}}}"#,
@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn wc_empty_file() {
         let p = write_file("wc_empty.txt", b"");
-        let (c, _ms, _path) = wordcount("wc_empty.txt").unwrap();
+        let (c, _ms, _path) = word_count("wc_empty.txt").unwrap();
         assert_eq!(c.lines, 0);
         assert_eq!(c.words, 0);
         assert_eq!(c.bytes, 0);
@@ -93,7 +93,7 @@ mod tests {
         // Words: "hello"(5) "world"(5) "this"(4) "is"(2) "rust!"(5)
         let data = b"hello world\nthis is rust!";
         let p = write_file("wc_simple.txt", data);
-        let (c, _ms, _path) = wordcount("wc_simple.txt").unwrap();
+        let (c, _ms, _path) = word_count("wc_simple.txt").unwrap();
         assert_eq!(c.lines, 1);
         assert_eq!(c.words, 5);
         assert_eq!(c.bytes, data.len() as u64);
@@ -106,7 +106,7 @@ mod tests {
         // Text: "a\tb  \r\nc\x0B\x0Cd\n" => words: a,b,c,d; lines: 2 ('\n' twice)
         let data = b"a\tb  \r\nc\x0B\x0Cd\n";
         let p = write_file("wc_ws.txt", data);
-        let (c, _ms, _path) = wordcount("wc_ws.txt").unwrap();
+        let (c, _ms, _path) = word_count("wc_ws.txt").unwrap();
         assert_eq!(c.lines, 2);
         assert_eq!(c.words, 4);
         assert_eq!(c.bytes, data.len() as u64);
@@ -119,7 +119,7 @@ mod tests {
         // Here: one line, three words, no trailing '\n'
         let data = b"alpha beta gamma";
         let p = write_file("wc_no_nl.txt", data);
-        let (c, _ms, _path) = wordcount("wc_no_nl.txt").unwrap();
+        let (c, _ms, _path) = word_count("wc_no_nl.txt").unwrap();
         assert_eq!(c.lines, 0); // no '\n'
         assert_eq!(c.words, 3);
         assert_eq!(c.bytes, data.len() as u64);
@@ -134,7 +134,7 @@ mod tests {
             s.extend_from_slice(b"word1 word2 word3\n");
         }
         let p = write_file("wc_large.txt", &s);
-        let (c, _ms, _path) = wordcount("wc_large.txt").unwrap();
+        let (c, _ms, _path) = word_count("wc_large.txt").unwrap();
         assert_eq!(c.lines, 50_000);
         assert_eq!(c.words, 50_000 * 3);
         assert_eq!(c.bytes, s.len() as u64);

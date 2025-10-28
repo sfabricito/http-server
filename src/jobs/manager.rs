@@ -5,7 +5,6 @@ use crate::jobs::{
     job::{Job, JobStatus},
     workers::{cpu_pool::CpuPool, io_pool::IoPool},
 };
-use uuid::Uuid;
 
 pub struct JobManager {
     pub cpu_pool: CpuPool,

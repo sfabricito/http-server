@@ -1,16 +1,14 @@
-mod server;
-mod errors;
-mod http;
-mod router; 
-mod jobs;
-mod utils;  
-
 use std::sync::Arc;
 use std::env;
 use dotenv::dotenv;
-use server::{HttpServer, ServerConfig};
-use router::build_routes;
-use jobs::manager::JobManager;
+
+use HTTP_Server::{
+    http::{
+        router::build_routes,
+        server::{HttpServer, ServerConfig},
+    },
+    jobs::manager::JobManager,
+};
 
 fn main() {
     dotenv().ok();
