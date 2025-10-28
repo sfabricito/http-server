@@ -5,6 +5,7 @@ pub mod file;
 pub mod time;
 pub mod hash;
 pub mod commands;
+pub mod timeout;
 
 // cpu intensive utilities
 pub mod cpu {
