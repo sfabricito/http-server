@@ -82,72 +82,210 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
 
     // /reverse?text=abcdef
     builder = builder.get("/reverse", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let text = req.query_param("text")  .unwrap_or("");
-        Ok(Response::new(OK).with_body(text::reverse(text)))
+        let text = req.query_param("text")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'text'".into()))?;
+
+        if text.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'text' cannot be empty".into()));
+        }
+
+        let reversed = text::reverse(text);
+        let json = format!("{{\"original\": \"{}\", \"reversed\": \"{}\"}}", text, reversed);
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
+
 
     // /hash?text=someinput
     builder = builder.get("/hash", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let text = req.query_param("text").unwrap_or("");
-        Ok(Response::new(OK).with_body(hash::hash_text(text)))
+        let text = req.query_param("text")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'text'".into()))?;
+
+        if text.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'text' cannot be empty".into()));
+        }
+
+        let hash_val = hash::hash_text(text);
+        let json = format!("{{\"text\": \"{}\", \"sha256\": \"{}\"}}", text, hash_val);
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
+
 
     // /timestamp
     builder = builder.get("/timestamp", Arc::new(SimpleHandler(|_req: &HttpRequest| {
-        Ok(Response::new(OK).with_body(time::timestamp()))
+        let ts = time::timestamp();
+        let json = format!("{{\"timestamp\": \"{}\"}}", ts);
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
+
 
     // /simulate?seconds=s&task=name
     builder = builder.get("/simulate", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let secs = req.query_param("seconds").unwrap_or("1").parse::<u64>().unwrap_or(1);
+        let secs_str = req.query_param("seconds")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'seconds'".into()))?;
+
+        let secs = secs_str
+            .parse::<u64>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'seconds': {}", secs_str)))?;
+
         let task = req.query_param("task").unwrap_or("demo");
-        Ok(Response::new(OK).with_body(time::simulate(secs, task)))
+        let result = time::simulate(secs, task);
+
+        let json = format!(
+            "{{\"task\": \"{}\", \"duration_seconds\": {}, \"result\": \"{}\"}}",
+            task, secs, result
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
 
     // /createfile?name=filename&content=text&repeat=x
     builder = builder.get("/createfile", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let name = req.query_param("name").unwrap_or("output.txt");
+        let name = req.query_param("name")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?;
+        if name.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+        }
+
         let content = req.query_param("content").unwrap_or("Hello");
-        let repeat = req.query_param("repeat").unwrap_or("1").parse::<usize>().unwrap_or(1);
+        if content.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'content' cannot be empty".into()));
+        }
+
+        let repeat_str = req.query_param("repeat").unwrap_or("1");
+        let repeat = repeat_str
+            .parse::<usize>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'repeat': {}", repeat_str)))?;
+        if repeat == 0 {
+            return Err(ServerError::BadRequest("Parameter 'repeat' must be greater than 0".into()));
+        }
+
         file::create_file(name, content, repeat)?;
-        Ok(Response::new(OK).with_body(format!("File '{}' created", name)))
+
+        let json = format!(
+            "{{\"file\": \"{}\", \"content\": \"{}\", \"repeat\": {}}}",
+            name, content, repeat
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
 
     // /deletefile?name=filename
     builder = builder.get("/deletefile", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let name = req.query_param("name").unwrap_or("output.txt");
-        file::delete_file(name)?;
-        Ok(Response::new(OK).with_body(format!("File '{}' deleted", name)))
+        let name = req.query_param("name")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?;
+
+        if name.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+        }
+
+        match file::delete_file(name) {
+            Ok(msg) => {
+                let json = format!("{{\"status\": \"ok\", \"message\": \"{}\"}}", msg);
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) => {
+                let json = format!(
+                    "{{\"status\": \"error\", \"message\": \"Failed to delete '{}': {}\"}}",
+                    name, e
+                );
+                Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     })));
 
     // /random?count=n&min=a&max=b
     builder = builder.get("/random", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let count = req.query_param("count").unwrap_or("5").parse::<usize>().unwrap_or(5);
-        let min = req.query_param("min").unwrap_or("0").parse::<i32>().unwrap_or(0);
-        let max = req.query_param("max").unwrap_or("100").parse::<i32>().unwrap_or(100);
+        let count_str = req.query_param("count").unwrap_or("5");
+        let min_str = req.query_param("min").unwrap_or("0");
+        let max_str = req.query_param("max").unwrap_or("100");
+
+        let count = count_str
+            .parse::<usize>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid 'count': {}", count_str)))?;
+        let min = min_str
+            .parse::<i32>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid 'min': {}", min_str)))?;
+        let max = max_str
+            .parse::<i32>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid 'max': {}", max_str)))?;
+
+        if min > max {
+            return Err(ServerError::BadRequest("'min' cannot be greater than 'max'".into()));
+        }
+
         let nums = math::random(count, min, max);
-        Ok(Response::new(OK).with_body(format!("{:?}", nums)))
+        let json = format!("{{\"count\": {}, \"min\": {}, \"max\": {}, \"values\": {:?}}}", count, min, max, nums);
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
+
 
     // /sleep?seconds=s
     builder = builder.get("/sleep", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let secs = req.query_param("seconds").unwrap_or("1").parse::<u64>().unwrap_or(1);
+        let secs_str = req.query_param("seconds")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'seconds'".into()))?;
+
+        let secs = secs_str
+            .parse::<u64>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid integer for 'seconds': {}", secs_str)))?;
+
         time::sleep(secs);
-        Ok(Response::new(OK).with_body(format!("Slept {} seconds", secs)))
+
+        let json = format!("{{\"slept_seconds\": {}}}", secs);
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
 
-    //help
+    // /help
     builder = builder.get("/help", Arc::new(SimpleHandler(|_req: &HttpRequest| {
-        Ok(Response::new(OK).with_body(text::help()))
+        let help_text = text::help();
+
+        let json = format!(
+            "{{\"endpoint\": \"/help\", \"description\": \"Available commands and usage information.\", \"details\": \"{}\"}}",
+            help_text.replace('"', "'") 
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
 
     // /status
     builder = builder.get("/status", Arc::new(SimpleHandler(|_req: &HttpRequest| {
-        Ok(Response::new(OK).with_body("Server running OK"))
+        use std::time::SystemTime;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let json = format!(
+            "{{\"status\": \"running\", \"uptime\": {} , \"message\": \"Server running OK\"}}",
+            now
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
     })));
-
-
-    println!("✅ Router loaded!");
 
     builder.build()
 }
