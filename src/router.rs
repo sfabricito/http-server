@@ -19,6 +19,7 @@ use crate::{
         cpu::{
             is_prime::{self, PrimeMethod},
             factor::factorize,
+            matrixmul::matrixmul,
         },
     },
     jobs::{
@@ -415,7 +416,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
     builder = builder.get("/mandelbrot", Arc::new(SimpleHandler({
         let job_manager = job_manager.clone();
         move |req: &HttpRequest| {
-            // ---- Validate parameters ----
             let width_str = req.query_param("width")
                 .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'width'".into()))?;
             let height_str = req.query_param("height")
@@ -423,7 +423,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let iter_str = req.query_param("max_iter")
                 .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'max_iter'".into()))?;
 
-            // ---- Parse parameters ----
             let width = width_str.parse::<usize>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'width': {}", width_str)))?;
             let height = height_str.parse::<usize>()
@@ -431,7 +430,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let max_iter = iter_str.parse::<u32>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'max_iter': {}", iter_str)))?;
 
-            // ---- Validate ranges ----
             if width == 0 || height == 0 {
                 return Err(ServerError::BadRequest("Width and height must be greater than 0".into()));
             }
@@ -439,20 +437,14 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("max_iter must be greater than 0".into()));
             }
 
-            // ---- Timeout configuration ----
             let timeout_ms = std::env::var("TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
 
-            // ---- Best-effort run with timeout ----
             if let Some(result) = run_with_timeout(timeout_ms, move || {
                 crate::utils::cpu::mandelbrot::mandelbrot(width, height, max_iter, None)
             }) {
-                // ✅ Explicitly destructure the nested tuple here:
-                // run_with_timeout returns (T, wrapper_elapsed) where T is the
-                // mandelbrot result (map, mandelbrot_elapsed). So `result` is
-                // ((map, mandelbrot_elapsed), wrapper_elapsed).
                 let ((map, mandelbrot_elapsed), _wrapper_elapsed) = result;
 
                 let rows_json = map
@@ -473,7 +465,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                     .set_header("Content-Type", "application/json")
                     .with_body(json))
             } else {
-                // ---- Timeout exceeded → submit background job ----
                 let mut params = std::collections::HashMap::new();
                 params.insert("width".into(), width.to_string());
                 params.insert("height".into(), height.to_string());
@@ -492,6 +483,77 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             }
         }
     })));
+
+    // /matrixmul?size=N&seed=S
+    builder = builder.get("/matrixmul", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            // ---- Validate parameters ----
+            let size_str = req.query_param("size")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'size'".into()))?;
+            let seed_str = req.query_param("seed").unwrap_or("123");
+
+            if size_str.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'size' cannot be empty".into()));
+            }
+
+            // ---- Parse parameters ----
+            let size = size_str
+                .parse::<usize>()
+                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'size': {}", size_str)))?;
+            let seed = seed_str
+                .parse::<u64>()
+                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'seed': {}", seed_str)))?;
+
+            // ---- Range check ----
+            if size == 0 {
+                return Err(ServerError::BadRequest("Parameter 'size' must be greater than 0".into()));
+            }
+            if size > 1000 {
+                return Err(ServerError::BadRequest("Matrix size too large (max 1000)".into()));
+            }
+
+            // ---- Timeout configuration ----
+            let timeout_ms = std::env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5000);
+
+            // ---- Run with timeout ----
+            if let Some(result) = run_with_timeout(timeout_ms, move || {
+                crate::utils::cpu::matrixmul::matrixmul(size, seed)
+            }) {
+                // ✅ Double destructure the nested tuples
+                let ((hash, calc_elapsed), timeout_elapsed) = result;
+
+                let json = format!(
+                    "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
+                    size, seed, hash, calc_elapsed, timeout_elapsed
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            } else {
+                // ---- Timeout → background job ----
+                let mut params = std::collections::HashMap::new();
+                params.insert("size".into(), size.to_string());
+                params.insert("seed".into(), seed.to_string());
+
+                let job_id = job_manager.submit("matrixmul", params, true);
+
+                let json = format!(
+                    "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    size, seed, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
+
 
     builder.build()
 }
