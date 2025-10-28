@@ -1,4 +1,6 @@
+use std::env;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     errors::ServerError,
@@ -14,7 +16,7 @@ use crate::{
         file, 
         time,
         timeout::run_with_timeout,
-        cpu::is_prime,
+        cpu::is_prime::{self, PrimeMethod},
     },
     jobs::{
         manager::JobManager,
@@ -285,6 +287,69 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")
             .with_body(json))
+    })));
+
+
+    builder = builder.get("/isprime", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let n_str = req.query_param("n")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'n'".into()))?;
+
+            if n_str.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'n' cannot be empty".into()));
+            }
+
+            let n = n_str
+                .parse::<u64>()
+                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
+
+            let method_env = env::var("PRIME_NUMBER_METHOD")
+                .unwrap_or_else(|_| "MILLER_RABIN".to_string());
+
+            let method = match method_env.trim().to_uppercase().as_str() {
+                "TRIAL" | "SQRT" => is_prime::PrimeMethod::Trial,
+                _ => is_prime::PrimeMethod::MillerRabin,
+            };
+
+            let method_name = match method {
+                is_prime::PrimeMethod::Trial => "trial",
+                is_prime::PrimeMethod::MillerRabin => "miller-rabin",
+            };
+
+            let timeout_ms = env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(500);
+
+            if let Some((result, elapsed)) = run_with_timeout(timeout_ms, move || {
+                is_prime::is_prime(n, method)
+            }) {
+                let json = format!(
+                    "{{\"n\": {}, \"is_prime\": {}, \"method\": \"{}\", \"elapsed_ms\": {}}}",
+                    n, result, method_name, elapsed
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("n".into(), n.to_string());
+                params.insert("method".into(), method_name.to_string());
+
+                let job_id = job_manager.submit("isprime", params, true);
+
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     })));
 
     builder.build()

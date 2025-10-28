@@ -1,27 +1,20 @@
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-pub fn run_with_timeout<T, F>(timeout_ms: u64, func: F) -> Option<T>
+pub fn run_with_timeout<T, F>(timeout_ms: u64, func: F) -> Option<(T, u128)>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    use std::sync::mpsc;
-    use std::thread;
-
     let (tx, rx) = mpsc::channel();
+
     thread::spawn(move || {
+        let start = Instant::now();
         let result = func();
-        let _ = tx.send(result);
+        let elapsed = start.elapsed().as_millis();
+        let _ = tx.send((result, elapsed));
     });
 
-    let start = Instant::now();
-    loop {
-        if let Ok(result) = rx.try_recv() {
-            return Some(result);
-        }
-        if start.elapsed().as_millis() as u64 > timeout_ms {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    rx.recv_timeout(Duration::from_millis(timeout_ms)).ok()
 }
