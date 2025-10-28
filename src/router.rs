@@ -16,7 +16,10 @@ use crate::{
         file, 
         time,
         timeout::run_with_timeout,
-        cpu::is_prime::{self, PrimeMethod},
+        cpu::{
+            is_prime::{self, PrimeMethod},
+            factor::factorize,
+        },
     },
     jobs::{
         manager::JobManager,
@@ -289,7 +292,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             .with_body(json))
     })));
 
-
     builder = builder.get("/isprime", Arc::new(SimpleHandler({
         let job_manager = job_manager.clone();
         move |req: &HttpRequest| {
@@ -339,6 +341,63 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 params.insert("method".into(), method_name.to_string());
 
                 let job_id = job_manager.submit("isprime", params, true);
+
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
+
+    // /factor?n=NUM
+    builder = builder.get("/factor", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let n_str = req.query_param("n")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'n'".into()))?;
+
+            if n_str.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'n' cannot be empty".into()));
+            }
+
+            let n = n_str
+                .parse::<u64>()
+                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
+
+            let timeout_ms = env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(500);
+
+            let start = Instant::now();
+
+            if let Some((factors, elapsed)) = run_with_timeout(timeout_ms, move || {
+                factorize(n)
+            }) {
+                let factors_json: String = factors
+                    .iter()
+                    .map(|(p, c)| format!("[{},{}]", p, c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                let json = format!(
+                    "{{\"n\": {}, \"factors\": [{}], \"elapsed_ms\": {}}}",
+                    n, factors_json, elapsed
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("n".into(), n.to_string());
+
+                let job_id = job_manager.submit("factor", params, true);
 
                 let json = format!(
                     "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
