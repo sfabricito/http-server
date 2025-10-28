@@ -16,8 +16,8 @@ pub mod cpu {
 }
 
 pub mod io {
-    pub mod sortfile;
-    pub mod wordcount;
+    pub mod sort_file;
+    pub mod word_count;
     pub mod grep;
     pub mod compress;
     pub mod hash_file;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, BufRead, BufReader};
-use crate::errors::ServerError;
+use crate::http::errors::ServerError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpMethod {

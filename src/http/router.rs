@@ -1,10 +1,10 @@
 use std::env;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::SystemTime;
 
 use crate::{
-    errors::ServerError,
     http::{
+        errors::ServerError,
         handler::{RequestHandlerStrategy, Dispatcher},
         request::HttpRequest,
         response::{Response, OK},
@@ -19,13 +19,18 @@ use crate::{
         cpu::{
             is_prime::{self, PrimeMethod},
             factor::factorize,
+            mandelbrot::mandelbrot,
             matrixmul::matrixmul,
         },
+        io::{
+            sort_file::sort_file,
+            word_count::word_count,
+            grep::grep_file,
+            hash_file::hash_file,
+            compress::compress_file
+        }
     },
-    jobs::{
-        manager::JobManager,
-        job::JobStatus,
-    },
+    jobs::manager::JobManager,
     
 };
 
@@ -277,7 +282,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
 
     // /status
     builder = builder.get("/status", Arc::new(SimpleHandler(|_req: &HttpRequest| {
-        use std::time::SystemTime;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -311,13 +315,13 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .unwrap_or_else(|_| "MILLER_RABIN".to_string());
 
             let method = match method_env.trim().to_uppercase().as_str() {
-                "TRIAL" | "SQRT" => is_prime::PrimeMethod::Trial,
-                _ => is_prime::PrimeMethod::MillerRabin,
+                "TRIAL" | "SQRT" => PrimeMethod::Trial,
+                _ => PrimeMethod::MillerRabin,
             };
 
             let method_name = match method {
-                is_prime::PrimeMethod::Trial => "trial",
-                is_prime::PrimeMethod::MillerRabin => "miller-rabin",
+                PrimeMethod::Trial => "trial",
+                PrimeMethod::MillerRabin => "miller-rabin",
             };
 
             let timeout_ms = env::var("TIMEOUT")
@@ -374,8 +378,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
-
-            let start = Instant::now();
 
             if let Some((factors, elapsed)) = run_with_timeout(timeout_ms, move || {
                 factorize(n)
@@ -443,7 +445,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .unwrap_or(500);
 
             if let Some(result) = run_with_timeout(timeout_ms, move || {
-                crate::utils::cpu::mandelbrot::mandelbrot(width, height, max_iter, None)
+                mandelbrot(width, height, max_iter, None)
             }) {
                 let ((map, mandelbrot_elapsed), _wrapper_elapsed) = result;
 
@@ -516,7 +518,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .unwrap_or(5000);
 
             if let Some(result) = run_with_timeout(timeout_ms, move || {
-                crate::utils::cpu::matrixmul::matrixmul(size, seed)
+                matrixmul(size, seed)
             }) {
                 let ((hash, calc_elapsed), timeout_elapsed) = result;
 
@@ -573,8 +575,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
 
             let name_clone = name.clone();
             let algo_clone = algo.clone();
-            if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                crate::utils::io::sortfile::sort_file(&name_clone, &algo_clone)
+            if let Some((result, _total_elapsed)) = run_with_timeout(timeout_ms, move || {
+                sort_file(&name_clone, &algo_clone)
             }) {
                 match result {
                     Ok((out_path, count, sort_elapsed)) => {
@@ -639,7 +641,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let name = name.to_string();
             let name_for_timeout = name.clone();
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                crate::utils::io::wordcount::wordcount(&name_for_timeout)
+                word_count(&name_for_timeout)
             }) {
                 match result {
                     Ok((counts, elapsed, path)) => {
@@ -711,7 +713,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let pattern_for_timeout = pattern.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                crate::utils::io::grep::grep_file(&name_for_timeout, &pattern_for_timeout)
+                grep_file(&name_for_timeout, &pattern_for_timeout)
             }) {
                 match result {
                     Ok(res) => {
@@ -791,7 +793,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let codec_for_timeout = codec.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                crate::utils::io::compress::compress_file(&name_for_timeout, &codec_for_timeout)
+                compress_file(&name_for_timeout, &codec_for_timeout)
             }) {
                 match result {
                     Ok(res) => {
@@ -871,7 +873,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             let algo_for_timeout = algo.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                crate::utils::io::hash_file::hash_file(&name_for_timeout, &algo_for_timeout)
+                hash_file(&name_for_timeout, &algo_for_timeout)
             }) {
                 match result {
                     Ok(res) => {

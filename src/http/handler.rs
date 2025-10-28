@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::errors::ServerError;
-use super::request::{HttpMethod, HttpRequest};
+use std::collections::HashMap;
 use super::response::{Response, OK};
+use crate::http::errors::ServerError;
+use super::request::{HttpMethod, HttpRequest};
 
 pub trait RequestHandlerStrategy: Send + Sync + 'static {
     fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError>;
