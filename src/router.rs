@@ -759,6 +759,84 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
+    // /compress?name=FILE&codec=gzip|xz
+    builder = builder.get("/compress", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            // ---- Parse and validate query params ----
+            let name = req.query_param("name")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?;
+            let codec = req.query_param("codec")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'codec'".into()))?;
+
+            if name.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+            }
+
+            if !["gzip", "xz"].contains(&codec) {
+                return Err(ServerError::BadRequest(format!(
+                    "Invalid codec '{}'. Must be 'gzip' or 'xz'.",
+                    codec
+                )));
+            }
+
+            let timeout_ms = std::env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(20_000);
+
+            let name = name.to_string();
+            let codec = codec.to_string();
+            let name_for_timeout = name.clone();
+            let codec_for_timeout = codec.clone();
+
+            if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
+                crate::utils::io::compress::compress_file(&name_for_timeout, &codec_for_timeout)
+            }) {
+                match result {
+                    Ok(res) => {
+                        let out_name = res.output_file.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"codec\":\"{}\",\"output\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            name, codec, out_name, res.compressed_size, res.elapsed_ms, total_elapsed
+                        );
+
+                        Ok(Response::new(OK)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                    Err(e) => {
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"error\":\"{}\"}}",
+                            name, e
+                        );
+                        Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                }
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("name".into(), name.clone());
+                params.insert("codec".into(), codec.clone());
+
+                let job_id = job_manager.submit("compress", params, true);
+
+                let json = format!(
+                    "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, codec, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
+
 
     builder.build()
 }
