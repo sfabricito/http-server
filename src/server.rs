@@ -144,26 +144,58 @@ impl HttpServer {
     }
 }
 
-fn handle_connection<RW: Read + Write>(rw: &mut RW, dispatcher: &Dispatcher) -> Result<(), ServerError> {
+fn handle_connection<RW: Read + Write>(
+    rw: &mut RW,
+    dispatcher: &Dispatcher
+) -> Result<(), ServerError> {
     match HttpRequest::parse(rw) {
         Ok(req) => {
             let is_head = matches!(req.method, HttpMethod::HEAD);
+
             let resp = match dispatcher.dispatch(&req) {
                 Ok(r) => r,
-                Err(ServerError::BadRequest(_)) => Response::new(BAD_REQUEST).with_body("Bad Request"),
-                Err(ServerError::NotFound) => Response::new(NOT_FOUND).with_body("Not Found"),
-                Err(ServerError::Conflict(_)) => Response::new(CONFLICT).with_body("Conflict"),
-                Err(ServerError::TooManyRequests) => Response::new(TOO_MANY_REQUESTS).with_body("Too Many Requests"),
-                Err(ServerError::ServiceUnavailable) => Response::new(SERVICE_UNAVAILABLE).with_body("Service Unavailable"),
-                Err(ServerError::Internal(msg)) => Response::new(INTERNAL_SERVER_ERROR).with_body(format!("Internal: {}", msg)),
-                Err(ServerError::Io(e)) => Response::new(INTERNAL_SERVER_ERROR).with_body(format!("IO error: {}", e)),
+                Err(err) => {
+                    let status = match err {
+                        ServerError::BadRequest(_) => BAD_REQUEST,
+                        ServerError::NotFound => NOT_FOUND,
+                        ServerError::Conflict(_) => CONFLICT,
+                        ServerError::TooManyRequests => TOO_MANY_REQUESTS,
+                        ServerError::ServiceUnavailable => SERVICE_UNAVAILABLE,
+                        ServerError::Internal(_) | ServerError::Io(_) => INTERNAL_SERVER_ERROR,
+                    };
+
+                    let json_body = format!("{{\"error\": \"{}\"}}", err.to_string());
+                    Response::new(status)
+                        .set_header("Content-Type", "application/json")
+                        .with_body(json_body)
+                }
             };
+
             let bytes = resp.to_bytes(is_head);
-            let _ = rw.write_all(&bytes); let _ = rw.flush();
+            let _ = rw.write_all(&bytes);
+            let _ = rw.flush();
             Ok(())
         }
-        Err(ServerError::BadRequest(_)) => { let resp = Response::new(BAD_REQUEST).with_body("Bad Request"); let _ = rw.write_all(&resp.to_bytes(false)); Ok(()) }
-        Err(e) => { let resp = Response::new(INTERNAL_SERVER_ERROR).with_body(format!("{}", e)); let _ = rw.write_all(&resp.to_bytes(false)); Ok(()) }
+
+        Err(e) => {
+            let status = match e {
+                ServerError::BadRequest(_) => BAD_REQUEST,
+                ServerError::NotFound => NOT_FOUND,
+                ServerError::Conflict(_) => CONFLICT,
+                ServerError::TooManyRequests => TOO_MANY_REQUESTS,
+                ServerError::ServiceUnavailable => SERVICE_UNAVAILABLE,
+                ServerError::Internal(_) | ServerError::Io(_) => INTERNAL_SERVER_ERROR,
+            };
+
+            let json_body = format!("{{\"error\": \"{}\"}}", e.to_string());
+            let resp = Response::new(status)
+                .set_header("Content-Type", "application/json")
+                .with_body(json_body);
+
+            let _ = rw.write_all(&resp.to_bytes(false));
+            let _ = rw.flush();
+            Ok(())
+        }
     }
 }
 
