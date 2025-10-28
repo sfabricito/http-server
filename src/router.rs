@@ -488,7 +488,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
     builder = builder.get("/matrixmul", Arc::new(SimpleHandler({
         let job_manager = job_manager.clone();
         move |req: &HttpRequest| {
-            // ---- Validate parameters ----
             let size_str = req.query_param("size")
                 .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'size'".into()))?;
             let seed_str = req.query_param("seed").unwrap_or("123");
@@ -497,7 +496,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Parameter 'size' cannot be empty".into()));
             }
 
-            // ---- Parse parameters ----
             let size = size_str
                 .parse::<usize>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'size': {}", size_str)))?;
@@ -505,7 +503,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .parse::<u64>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'seed': {}", seed_str)))?;
 
-            // ---- Range check ----
             if size == 0 {
                 return Err(ServerError::BadRequest("Parameter 'size' must be greater than 0".into()));
             }
@@ -513,17 +510,14 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Matrix size too large (max 1000)".into()));
             }
 
-            // ---- Timeout configuration ----
             let timeout_ms = std::env::var("TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5000);
 
-            // ---- Run with timeout ----
             if let Some(result) = run_with_timeout(timeout_ms, move || {
                 crate::utils::cpu::matrixmul::matrixmul(size, seed)
             }) {
-                // ✅ Double destructure the nested tuples
                 let ((hash, calc_elapsed), timeout_elapsed) = result;
 
                 let json = format!(
@@ -535,7 +529,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                     .set_header("Content-Type", "application/json")
                     .with_body(json))
             } else {
-                // ---- Timeout → background job ----
                 let mut params = std::collections::HashMap::new();
                 params.insert("size".into(), size.to_string());
                 params.insert("seed".into(), seed.to_string());
@@ -554,6 +547,78 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
+    // /sortfile?name=FILE&algo=merge|quick
+    builder = builder.get("/sortfile", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let name = req.query_param("name")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?
+                .to_string();
+            let algo = req.query_param("algo").unwrap_or("merge").to_string();
+
+            if name.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+            }
+
+            if !["merge", "quick"].contains(&algo.as_str()) {
+                return Err(ServerError::BadRequest(format!(
+                    "Invalid algorithm '{}'. Must be 'merge' or 'quick'.", algo
+                )));
+            }
+
+            let timeout_ms = std::env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10_000);
+
+            let name_clone = name.clone();
+            let algo_clone = algo.clone();
+            if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
+                crate::utils::io::sortfile::sort_file(&name_clone, &algo_clone)
+            }) {
+                match result {
+                    Ok((out_path, count, sort_elapsed)) => {
+                        let sorted_name = out_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+
+                        let json = format!(
+                    "{{\"file\": \"{}\", \"algo\": \"{}\", \"sorted_file\": \"{}\", \"count\": {}, \"elapsed_ms\": {}}}",
+                    name, algo, sorted_name, count, sort_elapsed
+                );
+
+                        Ok(Response::new(OK)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                    Err(e) => {
+                        let json = format!(
+                            "{{\"file\": \"{}\", \"algo\": \"{}\", \"error\": \"{}\"}}",
+                            name, algo, e
+                        );
+                        Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                }
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("name".into(), name.clone().into());
+                params.insert("algo".into(), algo.clone().into());
+
+                let job_id = job_manager.submit("sortfile", params, true);
+
+                let json = format!(
+                    "{{\"file\": \"{}\", \"algo\": \"{}\", \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
 
     builder.build()
 }
