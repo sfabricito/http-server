@@ -9,7 +9,6 @@ pub fn factorize(mut n: u64) -> Vec<(u64, u32)> {
         return factors;
     }
 
-    // Step 1: remove small prime factors quickly
     for &p in &[2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47] {
         if n % p == 0 {
             let mut count = 0;
@@ -21,12 +20,10 @@ pub fn factorize(mut n: u64) -> Vec<(u64, u32)> {
         }
     }
 
-    // Step 2: Pollard’s Rho for the remaining large composite part
     if n > 1 {
         factor_recursive(n, &mut factors);
     }
 
-    // Step 3: combine repeated factors and sort
     let mut map = HashMap::new();
     for (p, c) in factors {
         *map.entry(p).or_insert(0) += c;
@@ -37,7 +34,6 @@ pub fn factorize(mut n: u64) -> Vec<(u64, u32)> {
     merged
 }
 
-/// Recursive Pollard's Rho factorization
 fn factor_recursive(n: u64, factors: &mut Vec<(u64, u32)>) {
     if n == 1 {
         return;
@@ -52,7 +48,6 @@ fn factor_recursive(n: u64, factors: &mut Vec<(u64, u32)>) {
     factor_recursive(n / d, factors);
 }
 
-/// Pollard’s Rho algorithm for finding a non-trivial divisor of n
 fn pollards_rho(n: u64) ->   u64 {
     if n % 2 == 0 {
         return 2;
@@ -71,14 +66,12 @@ fn pollards_rho(n: u64) ->   u64 {
         let diff = if x > y { x - y } else { y - x };
         d = gcd_u64(diff, n);
         if d == n {
-            // retry with new random parameters
             return pollards_rho(n);
         }
     }
     d
 }
 
-/// Greatest Common Divisor
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = a % b;
@@ -111,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_prime_number() {
-        assert_eq!(factorize(104729), vec![(104729, 1)]); // prime
+        assert_eq!(factorize(104729), vec![(104729, 1)]);
     }
 
     #[test]
