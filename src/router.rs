@@ -684,6 +684,82 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
+    // /grep?name=FILE&pattern=REGEX
+    builder = builder.get("/grep", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let name = req.query_param("name")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?;
+            let pattern = req.query_param("pattern")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'pattern'".into()))?;
+
+            if name.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+            }
+            if pattern.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'pattern' cannot be empty".into()));
+            }
+
+            let timeout_ms = std::env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10_000);
+
+            let name = name.to_string();
+            let pattern = pattern.to_string();
+            let name_for_timeout = name.clone();
+            let pattern_for_timeout = pattern.clone();
+
+            if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
+                crate::utils::io::grep::grep_file(&name_for_timeout, &pattern_for_timeout)
+            }) {
+                match result {
+                    Ok(res) => {
+                        let lines_json = res.matched_lines
+                            .iter()
+                            .map(|l| format!("\"{}\"", l.replace('"', "\\\"")))
+                            .collect::<Vec<_>>()
+                            .join(",");
+
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"pattern\":\"{}\",\"matches\":{},\"lines\":[{}],\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            name, pattern, res.total_matches, lines_json, res.elapsed_ms, total_elapsed
+                        );
+
+                        Ok(Response::new(OK)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                    Err(e) => {
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"error\":\"{}\"}}",
+                            name, e
+                        );
+                        Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                }
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("name".into(), name.clone());
+                params.insert("pattern".into(), pattern.clone());
+
+                let job_id = job_manager.submit("grep", params, true);
+
+                let json = format!(
+                    "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, pattern, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
+
+
     builder.build()
 }
 
