@@ -837,6 +837,83 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
+    // /hashfile?name=FILE&algo=sha256
+    builder = builder.get("/hashfile", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let name = req.query_param("name")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?;
+            let algo = req.query_param("algo")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'algo'".into()))?;
+
+            if name.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
+            }
+            if algo.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'algo' cannot be empty".into()));
+            }
+
+            if algo.to_lowercase() != "sha256" {
+                return Err(ServerError::BadRequest(format!(
+                    "Unsupported algorithm '{}'. Only 'sha256' is supported.",
+                    algo
+                )));
+            }
+
+            let timeout_ms = std::env::var("TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10_000);
+
+            let name = name.to_string();
+            let algo = algo.to_string();
+            let name_for_timeout = name.clone();
+            let algo_for_timeout = algo.clone();
+
+            if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
+                crate::utils::io::hash_file::hash_file(&name_for_timeout, &algo_for_timeout)
+            }) {
+                match result {
+                    Ok(res) => {
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"algorithm\":\"{}\",\"hash\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            name, algo, res.hash_hex, res.file_size, res.elapsed_ms, total_elapsed
+                        );
+
+                        Ok(Response::new(OK)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                    Err(e) => {
+                        let json = format!(
+                            "{{\"file\":\"{}\",\"error\":\"{}\"}}",
+                            name, e
+                        );
+                        Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                            .set_header("Content-Type", "application/json")
+                            .with_body(json))
+                    }
+                }
+            } else {
+                let mut params = std::collections::HashMap::new();
+                params.insert("name".into(), name.clone());
+                params.insert("algo".into(), algo.clone());
+
+                let job_id = job_manager.submit("hashfile", params, true);
+
+                let json = format!(
+                    "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
+    })));
+
+
 
     builder.build()
 }
