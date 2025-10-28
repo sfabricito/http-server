@@ -20,6 +20,40 @@ pub fn random(count: usize, min: i32, max: i32) -> Vec<i32> {
     (0..count).map(|_| rng.gen_range(min..=max)).collect()
 }
 
+#[inline]
+pub fn mul_mod_u128(a: u128, b: u128, m: u128) -> u128 {
+    ((a % m) * (b % m)) % m
+}
+
+#[inline]
+pub fn pow_mod_u128(mut a: u128, mut e: u128, m: u128) -> u128 {
+    let mut r: u128 = 1 % m;
+    a %= m;
+    while e > 0 {
+        if (e & 1) == 1 { r = mul_mod_u128(r, a, m); }
+        a = mul_mod_u128(a, a, m);
+        e >>= 1;
+    }
+    r
+}
+
+#[inline]
+pub fn mul_mod_u64(a: u64, b: u64, m: u64) -> u64 {
+    ((a as u128 * b as u128) % m as u128) as u64
+}
+
+#[inline]
+pub fn pow_mod_u64(mut a: u64, mut e: u64, m: u64) -> u64 {
+    let mut r: u64 = 1 % m;
+    a %= m;
+    while e > 0 {
+        if (e & 1) == 1 { r = mul_mod_u64(r, a, m); }
+        a = mul_mod_u64(a, a, m);
+        e >>= 1;
+    }
+    r
+}
+
 
 #[cfg(test)]
 mod tests {
