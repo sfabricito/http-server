@@ -7,10 +7,21 @@ use crate::{
         request::HttpRequest,
         response::{Response, OK},
     },
-    utils::{math, text, hash, file, time},
+    utils::{
+        math, 
+        text, 
+        hash, 
+        file, 
+        time,
+        timeout::run_with_timeout,
+        cpu::is_prime,
+    },
+    jobs::{
+        manager::JobManager,
+        job::JobStatus,
+    },
+    
 };
-
-
 
 pub struct SimpleHandler<F>(pub F);
 
@@ -24,25 +35,54 @@ where
 }
 
 
-pub fn build_routes() -> Dispatcher {
+pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
     let mut builder = Dispatcher::builder();
 
     // /fibonacci?num=N
     builder = builder.get("/fibonacci", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let n = req.query_param("num").unwrap_or("0").parse::<u64>().unwrap_or(0);
+        let n_str = req.query_param("num")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'num'".into()))?;
+
+        let n = n_str
+            .parse::<u64>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'num': {}", n_str)))?;
+
+        if n > 93 {
+            return Err(ServerError::BadRequest("Value too large — risk of overflow".into()));
+        }
+
         let fib = math::fibonacci(n);
-        Ok(Response::new(OK).with_body(format!("{}", fib)))
+
+        let json_body = format!("{{\"num\": {}, \"fibonacci\": {}}}", n, fib);
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json_body))
     })));
 
     // /toupper?text=abcd
     builder = builder.get("/toupper", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let text = req.query_param("text").unwrap_or("");
-        Ok(Response::new(OK).with_body(text::to_upper(text)))
+        let text = req.query_param("text")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'text'".into()))?;
+
+        if text.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'text' cannot be empty".into()));
+        }
+
+        let upper = text::to_upper(text);
+
+        let json_body = format!(
+            "{{\"original\": \"{}\", \"upper\": \"{}\"}}",
+            text, upper
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json_body))
     })));
 
     // /reverse?text=abcdef
     builder = builder.get("/reverse", Arc::new(SimpleHandler(|req: &HttpRequest| {
-        let text = req.query_param("text").unwrap_or("");
+        let text = req.query_param("text")  .unwrap_or("");
         Ok(Response::new(OK).with_body(text::reverse(text)))
     })));
 
@@ -105,7 +145,9 @@ pub fn build_routes() -> Dispatcher {
     builder = builder.get("/status", Arc::new(SimpleHandler(|_req: &HttpRequest| {
         Ok(Response::new(OK).with_body("Server running OK"))
     })));
-println!("✅ Router loaded!");
+
+
+    println!("✅ Router loaded!");
 
     builder.build()
 }
