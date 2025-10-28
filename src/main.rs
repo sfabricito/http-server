@@ -2,18 +2,21 @@ mod server;
 mod errors;
 mod http;
 mod router; 
+mod jobs;
 mod utils;  
+
+use std::sync::Arc;
 use std::env;
 use dotenv::dotenv;
 use server::{HttpServer, ServerConfig};
-use router::build_routes; 
-
+use router::build_routes;
+use jobs::manager::JobManager;
 
 fn main() {
     dotenv().ok();
 
     let parse_env_var = |name: &str, default: usize| {
-        std::env::var(name)
+        env::var(name)
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
@@ -21,9 +24,10 @@ fn main() {
 
     let bind_addr = env::var("BIND_ADDRESS")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-
     let max_conns = parse_env_var("MAX_CONNECTIONS", 64);
     let rate_limit = parse_env_var("RATE_LIMIT_PER_SEC", 200);
+    let cpu_workers = parse_env_var("CPU_WORKERS", 4);
+    let io_workers = parse_env_var("IO_WORKERS", 2);
 
     let cfg = ServerConfig {
         bind_addr,
@@ -31,10 +35,10 @@ fn main() {
         rate_limit_per_sec: rate_limit,
     };
 
-    // ⬇️ Build Dispatcher from your router.rs
-    let dispatcher = build_routes();
+    let job_manager = Arc::new(JobManager::new(cpu_workers, io_workers));
 
-    // ⬇️ Plug dispatcher into server
+    let dispatcher = build_routes(job_manager.clone());
+
     let server = HttpServer::with_dispatcher(cfg, dispatcher);
 
     if let Err(e) = server.run() {
