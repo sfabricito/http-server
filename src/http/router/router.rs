@@ -30,7 +30,10 @@ use crate::{
             compress::compress_file
         }
     },
-    jobs::manager::JobManager,
+    jobs::{
+        manager::JobManager,
+        job::JobStatus::{self}
+    },
     
 };
 
@@ -324,7 +327,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 PrimeMethod::MillerRabin => "miller-rabin",
             };
 
-            let timeout_ms = env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -374,7 +377,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .parse::<u64>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
 
-            let timeout_ms = env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -439,7 +442,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("max_iter must be greater than 0".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -512,7 +515,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Matrix size too large (max 1000)".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5000);
@@ -568,7 +571,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -633,7 +636,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -702,7 +705,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Parameter 'pattern' cannot be empty".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -782,7 +785,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(20_000);
@@ -862,7 +865,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -914,6 +917,9 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
             }
         }
     })));
+
+    // job routes are registered from the `jobs` submodule
+    builder = super::jobs::register(builder, job_manager.clone());
 
 
 

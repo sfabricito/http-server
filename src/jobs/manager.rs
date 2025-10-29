@@ -1,3 +1,4 @@
+use std::env;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,9 +24,17 @@ impl JobManager {
 
     pub fn submit(&self, task: &str, params: HashMap<String, String>, is_cpu: bool) -> String {
         let timeout = if is_cpu {
-            Duration::from_secs(60)
+            let cpu_timeout_secs = env::var("CPU_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60); 
+            Duration::from_secs(cpu_timeout_secs)
         } else {
-            Duration::from_secs(120)
+            let io_timeout_secs = env::var("IO_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(120); 
+            Duration::from_secs(io_timeout_secs)
         };
         let job = Arc::new(Job::new(task, params, timeout));
         let id = job.id.clone();
