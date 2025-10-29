@@ -113,8 +113,44 @@ impl RequestHandlerStrategy for JobStatusHandler {
     }
 }
 
+pub struct JobSubmitHandler {
+    pub job_manager: Arc<JobManager>,
+}
+
+impl RequestHandlerStrategy for JobSubmitHandler {
+    fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
+        let task = req.query_param("task")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'task'".into()))?;
+
+        if task.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'task' cannot be empty".into()));
+        }
+
+        let mut params = HashMap::new();
+        for pair in req.query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k != "task" {
+                    params.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let job_id = self.job_manager.submit(task, params, true);
+
+        let json = format!(
+            "{{\"job_id\":\"{}\",\"status\":\"queued\"}}",
+            job_id
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
+    }
+}
+
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
     builder
         .get("/jobs/result", Arc::new(JobResultHandler { job_manager: job_manager.clone() }))
         .get("/jobs/status", Arc::new(JobStatusHandler { job_manager: job_manager.clone() }))
+        .get("/jobs/submit", Arc::new(JobSubmitHandler { job_manager: job_manager.clone() }))
 }
