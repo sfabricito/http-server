@@ -23,6 +23,8 @@ pub struct JobManager {
     pub persist_path: PathBuf,
 }
 
+use crate::jobs::executables;
+
 impl JobManager {
     pub fn new(cpu_workers: usize, io_workers: usize) -> Arc<Self> {
         let jobs = Arc::new(Mutex::new(HashMap::new()));
@@ -96,38 +98,34 @@ impl JobManager {
             *job.started_at.lock().unwrap() = Some(Instant::now());
         }
 
-
         let out: Result<String, String> = match job.task.as_str() {
-            "sortfile" => {
-                let name = job.params.get("name").cloned().unwrap_or_default();
-                let algo = job.params.get("algo").cloned().unwrap_or("merge".into());
+            // CPU-bound executables
+            // "isprime" => executables::isprime::run(&job.params),
+            // "factor" => executables::factor::run(&job.params),
+            // "matrixmul" => executables::matrixmul::run(&job.params),
+            // "mandelbrot" => executables::mandelbrot::run(&job.params),
 
-                match sort_file(&name, &algo) {
-                    Ok((out_path, count, sort_elapsed)) => {
-                        let sorted_name = out_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        Ok(format!(
-                            "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
-                            name, algo, sorted_name, count, sort_elapsed
-                        ))
-                    }
-                    Err(e) => Err(format!("Error sorting file: {}", e)),
-                }
-            }
-            _ => Ok(format!("{{\"task\":\"{}\",\"status\":\"ok\"}}", job.task)),
+            // IO-bound executables
+            "sortfile" => executables::sort_file::run(&job.params),
+
+            // Unknown task
+            _ => Err(format!("Unknown task '{}'", job.task)),
         };
 
         {
-            *job.result.lock().unwrap() = out.ok();
+            *job.result.lock().unwrap() = out.clone().ok();
             *job.finished_at.lock().unwrap() = Some(Instant::now());
 
-            if job.is_expired() {
-                *job.status.lock().unwrap() = JobStatus::Timeout;
-            } else {
-                *job.status.lock().unwrap() = JobStatus::Done;
-            }
+            *job.status.lock().unwrap() = match out {
+                Ok(_) => {
+                    if job.is_expired() {
+                        JobStatus::Timeout
+                    } else {
+                        JobStatus::Done
+                    }
+                }
+                Err(e) => JobStatus::Error(e),
+            };
         }
 
         save_job_state(&job, &self.persist_path);
