@@ -1,5 +1,5 @@
 pub mod sort_file;
-// pub mod isprime;
-// pub mod factor;
-// pub mod matrixmul;
-// pub mod mandelbrot;
+pub mod word_count;
+// pub mod grep;
+// pub mod compress;
+// pub mod hash_file;
