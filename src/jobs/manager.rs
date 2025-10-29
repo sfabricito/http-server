@@ -5,7 +5,11 @@ use crate::jobs::{
     workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
-use crate::utils::io::sort_file::sort_file;
+use crate::utils::{
+    io::{
+        sort_file::sort_file,
+    }
+};
 
 pub struct PoolMetrics {
     pub queue_lengths: (usize, usize, usize),
@@ -19,12 +23,14 @@ pub struct JobManager {
     pub persist_path: PathBuf,
 }
 
+use crate::jobs::executables;
+
 impl JobManager {
     pub fn new(cpu_workers: usize, io_workers: usize) -> Arc<Self> {
         let jobs = Arc::new(Mutex::new(HashMap::new()));
         let persist_path = std::env::var("JOB_PERSIST_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./data/jobs_state.jsonl"));
+            .unwrap_or_else(|_| PathBuf::from("./data/persistent/state.jsonl"));
             
         let manager = Arc::new_cyclic(|weak_self| JobManager {
             cpu_pool: Arc::new(CpuPool::empty()),
@@ -42,65 +48,8 @@ impl JobManager {
             (*ptr).io_pool = io_pool;
         }
 
-        let previous_jobs = load_job_states(&persist_path);
-        for record in previous_jobs {
-            println!(
-                "[restore] Found job {} (task='{}', state={:?})",
-                record.id, record.task, record.status
-            );
-            let mut params = HashMap::new();
-            if let Some(p) = record.params {
-                for (k, v) in p {
-                    if let Some(s) = v.as_str() {
-                        params.insert(k.clone(), s.to_string());
-                    }
-                }
-            }
+        Self::load_persistent_jobs(&manager);
 
-            let timeout = Duration::from_secs(60);
-
-            let job = Arc::new(Job::from_saved(
-                &record.id,
-                &record.task,
-                params,
-                record.priority,
-                record.status.clone(),
-                timeout,
-                record.result.clone(),
-            ));
-
-            *job.status.lock().unwrap() = record.status.clone();
-            {
-                let mut map = manager.jobs.lock().unwrap();
-                map.insert(job.id.clone(), job.clone());
-            }
-
-            if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
-                let is_cpu = match record.task.as_str() {
-                    "isprime" | "factor" | "matrixmul" | "mandelbrot" => true,
-                    _ => false,
-                };
-
-                if is_cpu {
-                    manager.cpu_pool.queue.enqueue(job.clone());
-                    println!(
-                        "[restore] Re-queued job {} into CPU pool",
-                        record.id
-                    );
-                } else {
-                    manager.io_pool.queue.enqueue(job.clone());
-                    println!(
-                        "[restore] Re-queued job {} into IO pool",
-                        record.id
-                    );
-                }
-            } else {
-                println!(
-                    "[restore] Job {} restored in memory only (status = {:?})",
-                    record.id, record.status
-                );
-            }
-        }
         manager
     }
 
@@ -149,38 +98,38 @@ impl JobManager {
             *job.started_at.lock().unwrap() = Some(Instant::now());
         }
 
-
         let out: Result<String, String> = match job.task.as_str() {
-            "sortfile" => {
-                let name = job.params.get("name").cloned().unwrap_or_default();
-                let algo = job.params.get("algo").cloned().unwrap_or("merge".into());
+            // CPU-bound executables
+            "isprime" => executables::is_prime::run(&job.params),
+            // "factor" => executables::factor::run(&job.params),
+            // "matrixmul" => executables::matrixmul::run(&job.params),
+            // "mandelbrot" => executables::mandelbrot::run(&job.params),
 
-                match sort_file(&name, &algo) {
-                    Ok((out_path, count, sort_elapsed)) => {
-                        let sorted_name = out_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        Ok(format!(
-                            "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
-                            name, algo, sorted_name, count, sort_elapsed
-                        ))
-                    }
-                    Err(e) => Err(format!("Error sorting file: {}", e)),
-                }
-            }
-            _ => Ok(format!("{{\"task\":\"{}\",\"status\":\"ok\"}}", job.task)),
+            // IO-bound executables
+            "sortfile" => executables::sort_file::run(&job.params),
+            "wordcount" => executables::word_count::run(&job.params),
+            "grep" => executables::grep::run(&job.params),
+            "compress" => executables::compress::run(&job.params),
+            "hashfile" => executables::hash_file::run(&job.params),
+
+            // Unknown task
+            _ => Err(format!("Unknown task '{}'", job.task)),
         };
 
         {
-            *job.result.lock().unwrap() = out.ok();
+            *job.result.lock().unwrap() = out.clone().ok();
             *job.finished_at.lock().unwrap() = Some(Instant::now());
 
-            if job.is_expired() {
-                *job.status.lock().unwrap() = JobStatus::Timeout;
-            } else {
-                *job.status.lock().unwrap() = JobStatus::Done;
-            }
+            *job.status.lock().unwrap() = match out {
+                Ok(_) => {
+                    if job.is_expired() {
+                        JobStatus::Timeout
+                    } else {
+                        JobStatus::Done
+                    }
+                }
+                Err(e) => JobStatus::Error(e),
+            };
         }
 
         save_job_state(&job, &self.persist_path);
@@ -226,5 +175,65 @@ impl JobManager {
             },
         );
         m
+    }
+
+    fn load_persistent_jobs(manager: &Arc<JobManager>) {
+        let persist_path = &manager.persist_path;
+        let previous_jobs = load_job_states(persist_path);
+
+        for record in previous_jobs {
+            println!(
+                "[restore] Found job {} (task='{}', state={:?})",
+                record.id, record.task, record.status
+            );
+
+            let mut params = HashMap::new();
+            if let Some(p) = record.params {
+                for (k, v) in p {
+                    if let Some(s) = v.as_str() {
+                        params.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+
+            let timeout = Duration::from_secs(60);
+
+            let job = Arc::new(Job::from_saved(
+                &record.id,
+                &record.task,
+                params,
+                record.priority,
+                record.status.clone(),
+                timeout,
+                record.result.clone(),
+            ));
+
+            {
+                let mut map = manager.jobs.lock().unwrap();
+                map.insert(job.id.clone(), job.clone());
+            }
+
+            if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+                let is_cpu = matches!(
+                    record.task.as_str(),
+                    "isprime" | "factor" | "matrixmul" | "mandelbrot"
+                );
+
+                if is_cpu {
+                    manager.cpu_pool.queue.enqueue(job.clone());
+                    println!("[restore] Re-queued job {} into CPU pool", record.id);
+                } else {
+                    manager.io_pool.queue.enqueue(job.clone());
+                    println!("[restore] Re-queued job {} into IO pool", record.id);
+                }
+            } else {
+                println!(
+                    "[restore] Job {} restored in memory only (status = {:?})",
+                    record.id, record.status
+                );
+            }
+        }
+
+        println!("[restore] Completed loading job persistence from {:?}", persist_path);
     }
 }
