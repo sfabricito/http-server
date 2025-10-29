@@ -100,7 +100,7 @@ impl JobManager {
 
         let out: Result<String, String> = match job.task.as_str() {
             // CPU-bound executables
-            // "isprime" => executables::isprime::run(&job.params),
+            "isprime" => executables::is_prime::run(&job.params),
             // "factor" => executables::factor::run(&job.params),
             // "matrixmul" => executables::matrixmul::run(&job.params),
             // "mandelbrot" => executables::mandelbrot::run(&job.params),

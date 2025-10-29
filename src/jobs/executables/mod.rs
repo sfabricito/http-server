@@ -1,3 +1,5 @@
+pub mod is_prime;
+
 pub mod sort_file;
 pub mod word_count;
 pub mod grep;
