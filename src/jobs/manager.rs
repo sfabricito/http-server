@@ -109,6 +109,8 @@ impl JobManager {
             "sortfile" => executables::sort_file::run(&job.params),
             "wordcount" => executables::word_count::run(&job.params),
 
+            "compress" => executables::compress::run(&job.params),
+
             // Unknown task
             _ => Err(format!("Unknown task '{}'", job.task)),
         };

@@ -2,22 +2,29 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 
-use crate::http::handler::{RequestHandlerStrategy, DispatcherBuilder};
-use crate::http::router::router::{SimpleHandler, QueryParam};
-use crate::http::request::HttpRequest;
-use crate::http::response::{Response, OK};
-use crate::http::errors::ServerError;
-use crate::jobs::job::Priority;
-use crate::jobs::manager::JobManager;
-
-use crate::utils::io::{
-    sort_file::sort_file,
-    word_count::word_count,
-    grep::grep_file,
-    hash_file::hash_file,
-    compress::compress_file
+use crate::http::{
+    handler::{RequestHandlerStrategy, DispatcherBuilder},
+    router::router::{SimpleHandler, QueryParam},
+    request::HttpRequest,
+    response::{Response, OK},
+    errors::ServerError,
 };
-use crate::utils::timeout::run_with_timeout;
+
+use crate::jobs::{
+    job::Priority,
+    manager::JobManager,
+};
+
+use crate::utils::{
+    io::{
+        sort_file::sort_file,
+        word_count::word_count,
+        grep::grep_file,
+        hash_file::hash_file,
+        compress::compress_file
+    },    
+    timeout::run_with_timeout
+};
 
 /// /sortfile?name=FILE&algo=merge|quick
 pub struct SortFileHandler {
@@ -108,7 +115,7 @@ impl RequestHandlerStrategy for WordCountHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.clone().to_string());
 
-            let job_id = self.job_manager.submit("wordcount", params, true, Priority::Normal)
+            let job_id = self.job_manager.submit("wordcount", params, false, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -163,7 +170,7 @@ impl RequestHandlerStrategy for GrepHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("pattern".into(), pattern.to_string());
-            let job_id = self.job_manager.submit("grep", params, true, Priority::Normal)
+            let job_id = self.job_manager.submit("grep", params, false, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -218,7 +225,7 @@ impl RequestHandlerStrategy for CompressHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("codec".into(), codec.to_string());
-            let job_id = self.job_manager.submit("compress", params, true, Priority::Normal)
+            let job_id = self.job_manager.submit("compress", params, false, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -271,7 +278,7 @@ impl RequestHandlerStrategy for HashFileHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("algo".into(), algo.to_string());
-            let job_id = self.job_manager.submit("hashfile", params, true, Priority::Normal)
+            let job_id = self.job_manager.submit("hashfile", params, false, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
