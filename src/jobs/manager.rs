@@ -1,53 +1,189 @@
-use std::env;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{collections::HashMap, env, path::PathBuf, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use crate::jobs::{
-    job::{Job, JobStatus},
-    workers::{cpu_pool::CpuPool, io_pool::IoPool},
+    job::{Job, JobStatus, Priority},
+    persistence::{save_job_state, load_job_states},
+    workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
+use crate::utils::io::sort_file::sort_file;
+
+pub struct PoolMetrics {
+    pub queue_lengths: (usize, usize, usize),
+    pub worker_metrics: Arc<WorkerMetrics>,
+}
+
 pub struct JobManager {
-    pub cpu_pool: CpuPool,
-    pub io_pool: IoPool,
+    pub cpu_pool: Arc<CpuPool>,
+    pub io_pool: Arc<IoPool>,
     pub jobs: Arc<Mutex<HashMap<String, Arc<Job>>>>,
+    pub persist_path: PathBuf,
 }
 
 impl JobManager {
-    pub fn new(cpu_workers: usize, io_workers: usize) -> Self {
-        Self {
-            cpu_pool: CpuPool::new(cpu_workers),
-            io_pool: IoPool::new(io_workers),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+    pub fn new(cpu_workers: usize, io_workers: usize) -> Arc<Self> {
+        let jobs = Arc::new(Mutex::new(HashMap::new()));
+        let persist_path = std::env::var("JOB_PERSIST_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data/jobs_state.jsonl"));
+            
+        let manager = Arc::new_cyclic(|weak_self| JobManager {
+            cpu_pool: Arc::new(CpuPool::empty()),
+            io_pool: Arc::new(IoPool::empty()),
+            jobs: jobs.clone(),
+            persist_path: persist_path.clone(),
+        });
+
+        let cpu_pool = Arc::new(CpuPool::new(cpu_workers, manager.clone()));
+        let io_pool = Arc::new(IoPool::new(io_workers, manager.clone()));
+
+        unsafe {
+            let ptr = Arc::as_ptr(&manager) as *mut JobManager;
+            (*ptr).cpu_pool = cpu_pool;
+            (*ptr).io_pool = io_pool;
         }
+
+        let previous_jobs = load_job_states(&persist_path);
+        for record in previous_jobs {
+            println!(
+                "[restore] Found job {} (task='{}', state={:?})",
+                record.id, record.task, record.status
+            );
+            let mut params = HashMap::new();
+            if let Some(p) = record.params {
+                for (k, v) in p {
+                    if let Some(s) = v.as_str() {
+                        params.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+
+            let timeout = Duration::from_secs(60);
+
+            let job = Arc::new(Job::from_saved(
+                &record.id,
+                &record.task,
+                params,
+                record.priority,
+                record.status.clone(),
+                timeout,
+                record.result.clone(),
+            ));
+
+            *job.status.lock().unwrap() = record.status.clone();
+            {
+                let mut map = manager.jobs.lock().unwrap();
+                map.insert(job.id.clone(), job.clone());
+            }
+
+            if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+                let is_cpu = match record.task.as_str() {
+                    "isprime" | "factor" | "matrixmul" | "mandelbrot" => true,
+                    _ => false,
+                };
+
+                if is_cpu {
+                    manager.cpu_pool.queue.enqueue(job.clone());
+                    println!(
+                        "[restore] Re-queued job {} into CPU pool",
+                        record.id
+                    );
+                } else {
+                    manager.io_pool.queue.enqueue(job.clone());
+                    println!(
+                        "[restore] Re-queued job {} into IO pool",
+                        record.id
+                    );
+                }
+            } else {
+                println!(
+                    "[restore] Job {} restored in memory only (status = {:?})",
+                    record.id, record.status
+                );
+            }
+        }
+        manager
     }
 
-    pub fn submit(&self, task: &str, params: HashMap<String, String>, is_cpu: bool) -> String {
-        let timeout = if is_cpu {
-            let cpu_timeout_secs = env::var("CPU_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60); 
-            Duration::from_secs(cpu_timeout_secs)
-        } else {
-            let io_timeout_secs = env::var("IO_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(120); 
-            Duration::from_secs(io_timeout_secs)
-        };
-        let job = Arc::new(Job::new(task, params, timeout));
-        let id = job.id.clone();
 
-        self.jobs.lock().unwrap().insert(id.clone(), job.clone());
+    pub fn submit(
+        &self,
+        task: &str,
+        params: std::collections::HashMap<String, String>,
+        is_cpu: bool,
+        priority: Priority,
+    ) -> Result<String, String> {
+        let queue_max = env::var("JOB_QUEUE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100);
 
-        if is_cpu {
-            self.cpu_pool.sender.send(job).unwrap();
-        } else {
-            self.io_pool.sender.send(job).unwrap();
+        let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
+        if queue.total_len() >= queue_max {
+            return Err("QueueFull".into());
         }
 
-        id
+        let timeout_secs = if is_cpu {
+            env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+        } else {
+            env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
+        };
+
+        let job = Arc::new(Job::with_priority(task, params, priority, std::time::Duration::from_secs(timeout_secs)));
+        let id = job.id.clone();
+
+        {
+            let mut map = self.jobs.lock().unwrap();
+            map.insert(id.clone(), job.clone());
+        }
+
+        save_job_state(&job, &self.persist_path);
+
+        queue.enqueue(job);
+
+        Ok(id)
+    }
+
+    pub fn execute_job(&self, job: Arc<Job>) {
+        {
+            *job.status.lock().unwrap() = JobStatus::Running;
+            *job.started_at.lock().unwrap() = Some(Instant::now());
+        }
+
+
+        let out: Result<String, String> = match job.task.as_str() {
+            "sortfile" => {
+                let name = job.params.get("name").cloned().unwrap_or_default();
+                let algo = job.params.get("algo").cloned().unwrap_or("merge".into());
+
+                match sort_file(&name, &algo) {
+                    Ok((out_path, count, sort_elapsed)) => {
+                        let sorted_name = out_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        Ok(format!(
+                            "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
+                            name, algo, sorted_name, count, sort_elapsed
+                        ))
+                    }
+                    Err(e) => Err(format!("Error sorting file: {}", e)),
+                }
+            }
+            _ => Ok(format!("{{\"task\":\"{}\",\"status\":\"ok\"}}", job.task)),
+        };
+
+        {
+            *job.result.lock().unwrap() = out.ok();
+            *job.finished_at.lock().unwrap() = Some(Instant::now());
+
+            if job.is_expired() {
+                *job.status.lock().unwrap() = JobStatus::Timeout;
+            } else {
+                *job.status.lock().unwrap() = JobStatus::Done;
+            }
+        }
+
+        save_job_state(&job, &self.persist_path);
     }
 
     pub fn status(&self, id: &str) -> Option<JobStatus> {
@@ -55,15 +191,40 @@ impl JobManager {
     }
 
     pub fn result(&self, id: &str) -> Option<String> {
-        self.jobs.lock().unwrap().get(id)
-            .and_then(|j| j.result.lock().unwrap().clone())
+        self.jobs.lock().unwrap().get(id).and_then(|j| j.result.lock().unwrap().clone())
     }
 
     pub fn cancel(&self, id: &str) -> bool {
-        if let Some(job) = self.jobs.lock().unwrap().get(id) {
-            *job.status.lock().unwrap() = JobStatus::Canceled;
-            return true;
+        let map = self.jobs.lock().unwrap();
+        if let Some(job) = map.get(id) {
+            let mut s = job.status.lock().unwrap();
+            if *s == JobStatus::Queued {
+                *s = JobStatus::Canceled;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
-        false
+    }
+
+    pub fn get_metrics(&self) -> HashMap<String, PoolMetrics> {
+        let mut m = HashMap::new();
+        m.insert(
+            "cpu".into(),
+            PoolMetrics {
+                queue_lengths: self.cpu_pool.queue_lengths(),
+                worker_metrics: self.cpu_pool.metrics.clone(),
+            },
+        );
+        m.insert(
+            "io".into(),
+            PoolMetrics {
+                queue_lengths: self.io_pool.queue_lengths(),
+                worker_metrics: self.io_pool.metrics.clone(),
+            },
+        );
+        m
     }
 }

@@ -9,6 +9,7 @@ use crate::{
         request::HttpRequest,
         response::{Response, OK},
     },
+    jobs::job::Priority,
     utils::{
         math, 
         text, 
@@ -347,7 +348,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 params.insert("n".into(), n.to_string());
                 params.insert("method".into(), method_name.to_string());
 
-                let job_id = job_manager.submit("isprime", params, true);
+                let job_id = job_manager.submit("isprime", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -402,7 +404,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 let mut params = std::collections::HashMap::new();
                 params.insert("n".into(), n.to_string());
 
-                let job_id = job_manager.submit("factor", params, true);
+                let job_id = job_manager.submit("factor", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -474,7 +477,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 params.insert("height".into(), height.to_string());
                 params.insert("max_iter".into(), max_iter.to_string());
 
-                let job_id = job_manager.submit("mandelbrot", params, true);
+                let job_id = job_manager.submit("mandelbrot", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -537,7 +541,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 params.insert("size".into(), size.to_string());
                 params.insert("seed".into(), seed.to_string());
 
-                let job_id = job_manager.submit("matrixmul", params, true);
+                let job_id = job_manager.submit("matrixmul", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -552,17 +557,15 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
     })));
 
     // /sortfile?name=FILE&algo=merge|quick
-    builder = builder.get("/sortfile", Arc::new(SimpleHandler({
+    builder = builder.clone().get("/sortfile", Arc::new(SimpleHandler({
         let job_manager = job_manager.clone();
         move |req: &HttpRequest| {
-            let name = req.query_param("name")
+            let name = req
+                .query_param("name")
                 .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'name'".into()))?
                 .to_string();
-            let algo = req.query_param("algo").unwrap_or("merge").to_string();
 
-            if name.trim().is_empty() {
-                return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
-            }
+            let algo = req.query_param("algo").unwrap_or("merge").to_string();
 
             if !["merge", "quick"].contains(&algo.as_str()) {
                 return Err(ServerError::BadRequest(format!(
@@ -575,51 +578,59 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
 
+            // 🧠 Try immediate execution (best effort)
             let name_clone = name.clone();
             let algo_clone = algo.clone();
-            if let Some((result, _total_elapsed)) = run_with_timeout(timeout_ms, move || {
-                sort_file(&name_clone, &algo_clone)
-            }) {
+            if let Some((result, _total_elapsed)) = run_with_timeout(timeout_ms, move || sort_file(&name_clone, &algo_clone)) {
                 match result {
                     Ok((out_path, count, sort_elapsed)) => {
-                        let sorted_name = out_path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-
+                        let sorted_name = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
                         let json = format!(
-                    "{{\"file\": \"{}\", \"algo\": \"{}\", \"sorted_file\": \"{}\", \"count\": {}, \"elapsed_ms\": {}}}",
-                    name, algo, sorted_name, count, sort_elapsed
-                );
-
-                        Ok(Response::new(OK)
+                            "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
+                            name, algo, sorted_name, count, sort_elapsed
+                        );
+                        return Ok(Response::new(OK)
                             .set_header("Content-Type", "application/json")
-                            .with_body(json))
+                            .with_body(json));
                     }
                     Err(e) => {
                         let json = format!(
-                            "{{\"file\": \"{}\", \"algo\": \"{}\", \"error\": \"{}\"}}",
+                            "{{\"file\":\"{}\",\"algo\":\"{}\",\"error\":\"{}\"}}",
                             name, algo, e
                         );
-                        Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                        return Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
                             .set_header("Content-Type", "application/json")
-                            .with_body(json))
+                            .with_body(json));
                     }
                 }
-            } else {
-                let mut params = std::collections::HashMap::new();
-                params.insert("name".into(), name.clone().into());
-                params.insert("algo".into(), algo.clone().into());
+            }
 
-                let job_id = job_manager.submit("sortfile", params, true);
+            // ⏳ Otherwise, enqueue as IO job
+            let mut params = std::collections::HashMap::new();
+            params.insert("name".into(), name.clone());
+            params.insert("algo".into(), algo.clone());
 
-                let json = format!(
-                    "{{\"file\": \"{}\", \"algo\": \"{}\", \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-                    name, algo, timeout_ms, job_id
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
+            match job_manager.submit("sortfile", params, false, Priority::Normal) {
+                Ok(job_id) => {
+                    let json = format!(
+                        "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                        name, algo, timeout_ms, job_id
+                    );
+                    Ok(Response::new(OK)
+                        .set_header("Content-Type", "application/json")
+                        .with_body(json))
+                }
+                Err(e) if e == "QueueFull" => {
+                    let retry_after = 5000; // ms
+                    let json = format!(
+                        "{{\"error\":\"queue full\",\"retry_after_ms\":{}}}",
+                        retry_after
+                    );
+                    Ok(Response::new(crate::http::response::SERVICE_UNAVAILABLE)
+                        .set_header("Content-Type", "application/json")
+                        .with_body(json))
+                }
+                Err(e) => Err(ServerError::Internal(format!("Job submission failed: {}", e))),
             }
         }
     })));
@@ -674,7 +685,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 let mut params = std::collections::HashMap::new();
                 params.insert("name".into(), name.clone().to_string());
 
-                let job_id = job_manager.submit("wordcount", params, true);
+                let job_id = job_manager.submit("wordcount", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
@@ -709,10 +721,10 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
 
-            let name = name.to_string();
-            let pattern = pattern.to_string();
-            let name_for_timeout = name.clone();
-            let pattern_for_timeout = pattern.clone();
+            let name_str = name.to_string();
+            let pattern_str = pattern.to_string();
+            let name_for_timeout = name_str.clone();
+            let pattern_for_timeout = pattern_str.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
                 grep_file(&name_for_timeout, &pattern_for_timeout)
@@ -746,14 +758,15 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 }
             } else {
                 let mut params = std::collections::HashMap::new();
-                params.insert("name".into(), name.clone());
-                params.insert("pattern".into(), pattern.clone());
+                params.insert("name".into(), name.to_string());
+                params.insert("pattern".into(), pattern.to_string());
 
-                let job_id = job_manager.submit("grep", params, true);
+                let job_id = job_manager.submit("grep", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                    name, pattern, timeout_ms, job_id
+                    name_str, pattern_str, timeout_ms, job_id
                 );
 
                 Ok(Response::new(OK)
@@ -789,10 +802,10 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(20_000);
 
-            let name = name.to_string();
-            let codec = codec.to_string();
-            let name_for_timeout = name.clone();
-            let codec_for_timeout = codec.clone();
+            let name_str = name.to_string();
+            let codec_str = codec.to_string();
+            let name_for_timeout = name_str.clone();
+            let codec_for_timeout = codec_str.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
                 compress_file(&name_for_timeout, &codec_for_timeout)
@@ -824,14 +837,15 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 }
             } else {
                 let mut params = std::collections::HashMap::new();
-                params.insert("name".into(), name.clone());
-                params.insert("codec".into(), codec.clone());
+                params.insert("name".into(), name.to_string());
+                params.insert("codec".into(), codec.to_string());
 
-                let job_id = job_manager.submit("compress", params, true);
+                let job_id = job_manager.submit("compress", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                    name, codec, timeout_ms, job_id
+                    name_str, codec_str, timeout_ms, job_id
                 );
 
                 Ok(Response::new(OK)
@@ -869,10 +883,10 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
 
-            let name = name.to_string();
-            let algo = algo.to_string();
-            let name_for_timeout = name.clone();
-            let algo_for_timeout = algo.clone();
+            let name_str = name.to_string();
+            let algo_str = algo.to_string();
+            let name_for_timeout = name_str.clone();
+            let algo_for_timeout = algo_str.clone();
 
             if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || {
                 hash_file(&name_for_timeout, &algo_for_timeout)
@@ -900,14 +914,15 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 }
             } else {
                 let mut params = std::collections::HashMap::new();
-                params.insert("name".into(), name.clone());
-                params.insert("algo".into(), algo.clone());
+                params.insert("name".into(), name.to_string());
+                params.insert("algo".into(), algo.to_string());
 
-                let job_id = job_manager.submit("hashfile", params, true);
+                let job_id = job_manager.submit("hashfile", params, true, Priority::Normal)
+                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
                 let json = format!(
                     "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                    name, algo, timeout_ms, job_id
+                    name_str, algo_str, timeout_ms, job_id
                 );
 
                 Ok(Response::new(OK)

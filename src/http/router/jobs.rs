@@ -6,10 +6,10 @@ use crate::http::{
     request::HttpRequest,
     response::{Response, OK},
     errors::ServerError,
-    router::QueryParam,
+    router::router::QueryParam,
 };
 use crate::jobs::manager::JobManager;
-use crate::jobs::job::JobStatus;
+use crate::jobs::job::{JobStatus, Priority};
 
 pub struct JobResultHandler {
     pub job_manager: Arc<JobManager>,
@@ -84,6 +84,7 @@ impl RequestHandlerStrategy for JobStatusHandler {
                     JobStatus::Done => (100, "0s"),
                     JobStatus::Error(_) => (100, "n/a"),
                     JobStatus::Canceled => (0, "n/a"),
+                    JobStatus::Timeout => (100, "n/a"),
                 };
 
                 let status_str = match &status {
@@ -92,6 +93,7 @@ impl RequestHandlerStrategy for JobStatusHandler {
                     JobStatus::Done => "done",
                     JobStatus::Error(_) => "error",
                     JobStatus::Canceled => "canceled",
+                    JobStatus::Timeout => "timeout",
                 };
 
                 let json = format!(
@@ -135,7 +137,8 @@ impl RequestHandlerStrategy for JobSubmitHandler {
             }
         }
 
-        let job_id = self.job_manager.submit(task, params, true);
+        let job_id = self.job_manager.submit(task, params, true, Priority::Normal)
+            .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
         let json = format!(
             "{{\"job_id\":\"{}\",\"status\":\"queued\"}}",
@@ -163,12 +166,50 @@ impl RequestHandlerStrategy for JobCancelHandler {
 
         let canceled = self.job_manager.cancel(id);
 
-        let status_str = if canceled { "canceled" } else { "not_cancelable" };
+        let status_str = if canceled { "canceled".to_string() } else { "not_cancelable".to_string() };
 
         let json = format!(
             "{{\"id\":\"{}\",\"status\":\"{}\"}}",
             id, status_str
         );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
+    }
+}
+
+pub struct JobMetricsHandler {
+    pub job_manager: Arc<JobManager>,
+}
+
+impl RequestHandlerStrategy for JobMetricsHandler {
+    fn handle(&self, _req: &HttpRequest) -> Result<Response, ServerError> {
+        let pools = self.job_manager.get_metrics();
+        
+        let mut pools_json = Vec::new();
+        
+        for (name, metrics) in pools {
+            let queue_lengths = metrics.queue_lengths;
+            let worker_metrics = metrics.worker_metrics;
+            
+            pools_json.push(format!(
+                r#""{}":{{"queue_size":{{"high":{}, "normal":{}, "low":{}}},
+                   "workers":{{"active":{}, "total":{}}},
+                   "timings":{{"avg_wait_ms":{}, "avg_process_ms":{},
+                             "std_dev_wait_ms":{:.2}, "std_dev_process_ms":{:.2}}}}}"#,
+                name,
+                queue_lengths.0, queue_lengths.1, queue_lengths.2,
+                worker_metrics.active_workers.lock().unwrap(),
+                worker_metrics.total_workers,
+                worker_metrics.avg_wait.lock().unwrap().as_millis(),
+                worker_metrics.avg_exec.lock().unwrap().as_millis(),
+                0.0, // TODO std dev not yet implemented
+                0.0  // TODO std dev not yet implemented
+            ));
+        }
+
+        let json = format!("{{\"pools\":{{{}}}}}", pools_json.join(","));
 
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")
@@ -182,4 +223,5 @@ pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> Dis
         .get("/jobs/status", Arc::new(JobStatusHandler { job_manager: job_manager.clone() }))
         .get("/jobs/submit", Arc::new(JobSubmitHandler { job_manager: job_manager.clone() }))
         .get("/jobs/cancel", Arc::new(JobCancelHandler { job_manager: job_manager.clone() }))
+        .get("/metrics", Arc::new(JobMetricsHandler { job_manager }))
 }
