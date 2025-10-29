@@ -30,7 +30,10 @@ use crate::{
             compress::compress_file
         }
     },
-    jobs::manager::JobManager,
+    jobs::{
+        manager::JobManager,
+        job::JobStatus::{self}
+    },
     
 };
 
@@ -324,7 +327,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 PrimeMethod::MillerRabin => "miller-rabin",
             };
 
-            let timeout_ms = env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -374,7 +377,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 .parse::<u64>()
                 .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
 
-            let timeout_ms = env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -439,7 +442,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("max_iter must be greater than 0".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(500);
@@ -512,7 +515,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Matrix size too large (max 1000)".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5000);
@@ -568,7 +571,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -633,7 +636,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Parameter 'name' cannot be empty".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -702,7 +705,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 return Err(ServerError::BadRequest("Parameter 'pattern' cannot be empty".into()));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -782,7 +785,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(20_000);
@@ -862,7 +865,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 )));
             }
 
-            let timeout_ms = std::env::var("TIMEOUT")
+            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(10_000);
@@ -911,6 +914,67 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
                 Ok(Response::new(OK)
                     .set_header("Content-Type", "application/json")
                     .with_body(json))
+            }
+        }
+    })));
+
+    // /jobs/result?id=JOBID
+    builder = builder.get("/jobs/result", Arc::new(SimpleHandler({
+        let job_manager = job_manager.clone();
+        move |req: &HttpRequest| {
+            let id = req.query_param("id")
+                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'id'".into()))?;
+
+            if id.trim().is_empty() {
+                return Err(ServerError::BadRequest("Parameter 'id' cannot be empty".into()));
+            }
+
+            match job_manager.status(id) {
+                Some(status) => {
+                    match status {
+                        crate::jobs::job::JobStatus::Done => {
+                            if let Some(output) = job_manager.result(id) {
+                                let json = format!(
+                                    "{{\"id\":\"{}\",\"output\":{}}}",
+                                    id, output
+                                );
+                                Ok(Response::new(OK)
+                                    .set_header("Content-Type", "application/json")
+                                    .with_body(json))
+                            } else {
+                                let json = format!(
+                                    "{{\"id\":\"{}\",\"error\":\"Job finished but no output available\"}}",
+                                    id
+                                );
+                                Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                                    .set_header("Content-Type", "application/json")
+                                    .with_body(json))
+                            }
+                        }
+                        crate::jobs::job::JobStatus::Error(err_msg) => {
+                            let json = format!("{{\"id\":\"{}\",\"error\":\"{}\"}}", id, err_msg);
+                            Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+                                .set_header("Content-Type", "application/json")
+                                .with_body(json))
+                        }
+                        other => {
+                            let status_str = format!("{:?}", other);
+                            let json = format!(
+                                "{{\"id\":\"{}\",\"status\":\"{}\"}}",
+                                id, status_str
+                            );
+                            Ok(Response::new(OK)
+                                .set_header("Content-Type", "application/json")
+                                .with_body(json))
+                        }
+                    }
+                }
+                None => {
+                    let json = format!("{{\"id\":\"{}\",\"error\":\"Job not found\"}}", id);
+                    Ok(Response::new(crate::http::response::NOT_FOUND)
+                        .set_header("Content-Type", "application/json")
+                        .with_body(json))
+                }
             }
         }
     })));
