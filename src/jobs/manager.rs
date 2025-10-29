@@ -108,7 +108,7 @@ impl JobManager {
             // IO-bound executables
             "sortfile" => executables::sort_file::run(&job.params),
             "wordcount" => executables::word_count::run(&job.params),
-
+            "grep" => executables::grep::run(&job.params),
             "compress" => executables::compress::run(&job.params),
 
             // Unknown task
