@@ -32,7 +32,6 @@ use crate::{
     },
     jobs::{
         manager::JobManager,
-        job::JobStatus::{self}
     },
     
 };
@@ -927,7 +926,7 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
 }
 
 
-trait QueryParam {
+pub trait QueryParam {
     fn query_param(&self, key: &str) -> Option<&str>;
 }
 
