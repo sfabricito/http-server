@@ -110,6 +110,7 @@ impl JobManager {
             "wordcount" => executables::word_count::run(&job.params),
             "grep" => executables::grep::run(&job.params),
             "compress" => executables::compress::run(&job.params),
+            "hashfile" => executables::hash_file::run(&job.params),
 
             // Unknown task
             _ => Err(format!("Unknown task '{}'", job.task)),
