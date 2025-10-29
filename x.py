@@ -49,12 +49,12 @@ MINIMUM_VALUE = -10000000
 MAXIMUM_VALUE = 10000000
 
 # 2. Define the total count of numbers to generate
-NUMBER_COUNT = 500
+NUMBER_COUNT = 5000000
 
 # 3. Define the file path for storage
 # You can use an absolute path (e.g., 'C:/Users/YourName/Desktop/random_data.txt')
 # or a relative path (e.g., 'random_numbers.csv' which saves it in the script's directory).
-OUTPUT_FILE_PATH = "data/files/data.txt" 
+OUTPUT_FILE_PATH = "data/data.txt" 
 # ---------------------
 
 # Execute the function

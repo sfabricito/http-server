@@ -64,6 +64,7 @@ impl Dispatcher {
 }
 
 #[derive(Default)]
+#[derive(Clone)]
 pub struct DispatcherBuilder {
     get_map: HashMap<String, Arc<dyn RequestHandlerStrategy>>,
     head_map: HashMap<String, Arc<dyn RequestHandlerStrategy>>,
