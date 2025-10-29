@@ -1,4 +1,7 @@
 pub mod is_prime;
+pub mod factor;
+pub mod matrixmul;
+pub mod mandelbrot;
 
 pub mod sort_file;
 pub mod word_count;
