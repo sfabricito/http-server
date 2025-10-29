@@ -918,66 +918,8 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
-    // /jobs/result?id=JOBID
-    builder = builder.get("/jobs/result", Arc::new(SimpleHandler({
-        let job_manager = job_manager.clone();
-        move |req: &HttpRequest| {
-            let id = req.query_param("id")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'id'".into()))?;
-
-            if id.trim().is_empty() {
-                return Err(ServerError::BadRequest("Parameter 'id' cannot be empty".into()));
-            }
-
-            match job_manager.status(id) {
-                Some(status) => {
-                    match status {
-                        crate::jobs::job::JobStatus::Done => {
-                            if let Some(output) = job_manager.result(id) {
-                                let json = format!(
-                                    "{{\"id\":\"{}\",\"output\":{}}}",
-                                    id, output
-                                );
-                                Ok(Response::new(OK)
-                                    .set_header("Content-Type", "application/json")
-                                    .with_body(json))
-                            } else {
-                                let json = format!(
-                                    "{{\"id\":\"{}\",\"error\":\"Job finished but no output available\"}}",
-                                    id
-                                );
-                                Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
-                                    .set_header("Content-Type", "application/json")
-                                    .with_body(json))
-                            }
-                        }
-                        crate::jobs::job::JobStatus::Error(err_msg) => {
-                            let json = format!("{{\"id\":\"{}\",\"error\":\"{}\"}}", id, err_msg);
-                            Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
-                                .set_header("Content-Type", "application/json")
-                                .with_body(json))
-                        }
-                        other => {
-                            let status_str = format!("{:?}", other);
-                            let json = format!(
-                                "{{\"id\":\"{}\",\"status\":\"{}\"}}",
-                                id, status_str
-                            );
-                            Ok(Response::new(OK)
-                                .set_header("Content-Type", "application/json")
-                                .with_body(json))
-                        }
-                    }
-                }
-                None => {
-                    let json = format!("{{\"id\":\"{}\",\"error\":\"Job not found\"}}", id);
-                    Ok(Response::new(crate::http::response::NOT_FOUND)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
-                }
-            }
-        }
-    })));
+    // job routes are registered from the `jobs` submodule
+    builder = super::jobs::register(builder, job_manager.clone());
 
 
 
