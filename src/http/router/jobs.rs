@@ -148,9 +148,38 @@ impl RequestHandlerStrategy for JobSubmitHandler {
     }
 }
 
+pub struct JobCancelHandler {
+    pub job_manager: Arc<JobManager>,
+}
+
+impl RequestHandlerStrategy for JobCancelHandler {
+    fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
+        let id = req.query_param("id")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'id'".into()))?;
+
+        if id.trim().is_empty() {
+            return Err(ServerError::BadRequest("Parameter 'id' cannot be empty".into()));
+        }
+
+        let canceled = self.job_manager.cancel(id);
+
+        let status_str = if canceled { "canceled" } else { "not_cancelable" };
+
+        let json = format!(
+            "{{\"id\":\"{}\",\"status\":\"{}\"}}",
+            id, status_str
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
+    }
+}
+
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
     builder
         .get("/jobs/result", Arc::new(JobResultHandler { job_manager: job_manager.clone() }))
         .get("/jobs/status", Arc::new(JobStatusHandler { job_manager: job_manager.clone() }))
         .get("/jobs/submit", Arc::new(JobSubmitHandler { job_manager: job_manager.clone() }))
+        .get("/jobs/cancel", Arc::new(JobCancelHandler { job_manager: job_manager.clone() }))
 }
