@@ -8,4 +8,5 @@ pub mod router {
     pub mod jobs;
     pub mod cpu_bound;
     pub mod io_bound;
+    pub mod command;
 }
