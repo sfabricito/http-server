@@ -5,7 +5,11 @@ use crate::jobs::{
     workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
-use crate::utils::io::sort_file::sort_file;
+use crate::utils::{
+    io::{
+        sort_file::sort_file,
+    }
+};
 
 pub struct PoolMetrics {
     pub queue_lengths: (usize, usize, usize),
@@ -24,7 +28,7 @@ impl JobManager {
         let jobs = Arc::new(Mutex::new(HashMap::new()));
         let persist_path = std::env::var("JOB_PERSIST_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./data/jobs_state.jsonl"));
+            .unwrap_or_else(|_| PathBuf::from("./data/persistent/state.jsonl"));
             
         let manager = Arc::new_cyclic(|weak_self| JobManager {
             cpu_pool: Arc::new(CpuPool::empty()),
@@ -42,65 +46,8 @@ impl JobManager {
             (*ptr).io_pool = io_pool;
         }
 
-        let previous_jobs = load_job_states(&persist_path);
-        for record in previous_jobs {
-            println!(
-                "[restore] Found job {} (task='{}', state={:?})",
-                record.id, record.task, record.status
-            );
-            let mut params = HashMap::new();
-            if let Some(p) = record.params {
-                for (k, v) in p {
-                    if let Some(s) = v.as_str() {
-                        params.insert(k.clone(), s.to_string());
-                    }
-                }
-            }
+        Self::load_persistent_jobs(&manager);
 
-            let timeout = Duration::from_secs(60);
-
-            let job = Arc::new(Job::from_saved(
-                &record.id,
-                &record.task,
-                params,
-                record.priority,
-                record.status.clone(),
-                timeout,
-                record.result.clone(),
-            ));
-
-            *job.status.lock().unwrap() = record.status.clone();
-            {
-                let mut map = manager.jobs.lock().unwrap();
-                map.insert(job.id.clone(), job.clone());
-            }
-
-            if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
-                let is_cpu = match record.task.as_str() {
-                    "isprime" | "factor" | "matrixmul" | "mandelbrot" => true,
-                    _ => false,
-                };
-
-                if is_cpu {
-                    manager.cpu_pool.queue.enqueue(job.clone());
-                    println!(
-                        "[restore] Re-queued job {} into CPU pool",
-                        record.id
-                    );
-                } else {
-                    manager.io_pool.queue.enqueue(job.clone());
-                    println!(
-                        "[restore] Re-queued job {} into IO pool",
-                        record.id
-                    );
-                }
-            } else {
-                println!(
-                    "[restore] Job {} restored in memory only (status = {:?})",
-                    record.id, record.status
-                );
-            }
-        }
         manager
     }
 
@@ -226,5 +173,65 @@ impl JobManager {
             },
         );
         m
+    }
+
+    fn load_persistent_jobs(manager: &Arc<JobManager>) {
+        let persist_path = &manager.persist_path;
+        let previous_jobs = load_job_states(persist_path);
+
+        for record in previous_jobs {
+            println!(
+                "[restore] Found job {} (task='{}', state={:?})",
+                record.id, record.task, record.status
+            );
+
+            let mut params = HashMap::new();
+            if let Some(p) = record.params {
+                for (k, v) in p {
+                    if let Some(s) = v.as_str() {
+                        params.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+
+            let timeout = Duration::from_secs(60);
+
+            let job = Arc::new(Job::from_saved(
+                &record.id,
+                &record.task,
+                params,
+                record.priority,
+                record.status.clone(),
+                timeout,
+                record.result.clone(),
+            ));
+
+            {
+                let mut map = manager.jobs.lock().unwrap();
+                map.insert(job.id.clone(), job.clone());
+            }
+
+            if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+                let is_cpu = matches!(
+                    record.task.as_str(),
+                    "isprime" | "factor" | "matrixmul" | "mandelbrot"
+                );
+
+                if is_cpu {
+                    manager.cpu_pool.queue.enqueue(job.clone());
+                    println!("[restore] Re-queued job {} into CPU pool", record.id);
+                } else {
+                    manager.io_pool.queue.enqueue(job.clone());
+                    println!("[restore] Re-queued job {} into IO pool", record.id);
+                }
+            } else {
+                println!(
+                    "[restore] Job {} restored in memory only (status = {:?})",
+                    record.id, record.status
+                );
+            }
+        }
+
+        println!("[restore] Completed loading job persistence from {:?}", persist_path);
     }
 }
