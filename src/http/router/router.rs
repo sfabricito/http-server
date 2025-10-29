@@ -8,6 +8,7 @@ use crate::{
         handler::{RequestHandlerStrategy, Dispatcher},
         request::HttpRequest,
         response::{Response, OK},
+        router::{jobs, cpu_bound}
     },
     jobs::job::Priority,
     utils::{
@@ -17,12 +18,6 @@ use crate::{
         file, 
         time,
         timeout::run_with_timeout,
-        cpu::{
-            is_prime::{self, PrimeMethod},
-            factor::factorize,
-            mandelbrot::mandelbrot,
-            matrixmul::matrixmul,
-        },
         io::{
             sort_file::sort_file,
             word_count::word_count,
@@ -298,262 +293,6 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")
             .with_body(json))
-    })));
-
-    builder = builder.get("/isprime", Arc::new(SimpleHandler({
-        let job_manager = job_manager.clone();
-        move |req: &HttpRequest| {
-            let n_str = req.query_param("n")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'n'".into()))?;
-
-            if n_str.trim().is_empty() {
-                return Err(ServerError::BadRequest("Parameter 'n' cannot be empty".into()));
-            }
-
-            let n = n_str
-                .parse::<u64>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
-
-            let method_env = env::var("PRIME_NUMBER_METHOD")
-                .unwrap_or_else(|_| "MILLER_RABIN".to_string());
-
-            let method = match method_env.trim().to_uppercase().as_str() {
-                "TRIAL" | "SQRT" => PrimeMethod::Trial,
-                _ => PrimeMethod::MillerRabin,
-            };
-
-            let method_name = match method {
-                PrimeMethod::Trial => "trial",
-                PrimeMethod::MillerRabin => "miller-rabin",
-            };
-
-            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(500);
-
-            if let Some((result, elapsed)) = run_with_timeout(timeout_ms, move || {
-                is_prime::is_prime(n, method)
-            }) {
-                let json = format!(
-                    "{{\"n\": {}, \"is_prime\": {}, \"method\": \"{}\", \"elapsed_ms\": {}}}",
-                    n, result, method_name, elapsed
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            } else {
-                let mut params = std::collections::HashMap::new();
-                params.insert("n".into(), n.to_string());
-                params.insert("method".into(), method_name.to_string());
-
-                let job_id = job_manager.submit("isprime", params, true, Priority::Normal)
-                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
-
-                let json = format!(
-                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-                    n, timeout_ms, job_id
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            }
-        }
-    })));
-
-    // /factor?n=NUM
-    builder = builder.get("/factor", Arc::new(SimpleHandler({
-        let job_manager = job_manager.clone();
-        move |req: &HttpRequest| {
-            let n_str = req.query_param("n")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'n'".into()))?;
-
-            if n_str.trim().is_empty() {
-                return Err(ServerError::BadRequest("Parameter 'n' cannot be empty".into()));
-            }
-
-            let n = n_str
-                .parse::<u64>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'n': {}", n_str)))?;
-
-            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(500);
-
-            if let Some((factors, elapsed)) = run_with_timeout(timeout_ms, move || {
-                factorize(n)
-            }) {
-                let factors_json: String = factors
-                    .iter()
-                    .map(|(p, c)| format!("[{},{}]", p, c))
-                    .collect::<Vec<_>>()
-                    .join(",");
-
-                let json = format!(
-                    "{{\"n\": {}, \"factors\": [{}], \"elapsed_ms\": {}}}",
-                    n, factors_json, elapsed
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            } else {
-                let mut params = std::collections::HashMap::new();
-                params.insert("n".into(), n.to_string());
-
-                let job_id = job_manager.submit("factor", params, true, Priority::Normal)
-                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
-
-                let json = format!(
-                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-                    n, timeout_ms, job_id
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            }
-        }
-    })));
-
-    // /mandelbrot?width=W&height=H&max_iter=I
-    builder = builder.get("/mandelbrot", Arc::new(SimpleHandler({
-        let job_manager = job_manager.clone();
-        move |req: &HttpRequest| {
-            let width_str = req.query_param("width")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'width'".into()))?;
-            let height_str = req.query_param("height")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'height'".into()))?;
-            let iter_str = req.query_param("max_iter")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'max_iter'".into()))?;
-
-            let width = width_str.parse::<usize>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'width': {}", width_str)))?;
-            let height = height_str.parse::<usize>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'height': {}", height_str)))?;
-            let max_iter = iter_str.parse::<u32>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'max_iter': {}", iter_str)))?;
-
-            if width == 0 || height == 0 {
-                return Err(ServerError::BadRequest("Width and height must be greater than 0".into()));
-            }
-            if max_iter == 0 {
-                return Err(ServerError::BadRequest("max_iter must be greater than 0".into()));
-            }
-
-            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(500);
-
-            if let Some(result) = run_with_timeout(timeout_ms, move || {
-                mandelbrot(width, height, max_iter, None)
-            }) {
-                let ((map, mandelbrot_elapsed), _wrapper_elapsed) = result;
-
-                let rows_json = map
-                    .iter()
-                    .map(|row| {
-                        let row_str = row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
-                        format!("[{}]", row_str)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-
-                let json = format!(
-                    "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"elapsed_ms\": {}, \"map\": [{}]}}",
-                    width, height, max_iter, mandelbrot_elapsed, rows_json
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            } else {
-                let mut params = std::collections::HashMap::new();
-                params.insert("width".into(), width.to_string());
-                params.insert("height".into(), height.to_string());
-                params.insert("max_iter".into(), max_iter.to_string());
-
-                let job_id = job_manager.submit("mandelbrot", params, true, Priority::Normal)
-                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
-
-                let json = format!(
-                    "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-                    width, height, max_iter, timeout_ms, job_id
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            }
-        }
-    })));
-
-    // /matrixmul?size=N&seed=S
-    builder = builder.get("/matrixmul", Arc::new(SimpleHandler({
-        let job_manager = job_manager.clone();
-        move |req: &HttpRequest| {
-            let size_str = req.query_param("size")
-                .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'size'".into()))?;
-            let seed_str = req.query_param("seed").unwrap_or("123");
-
-            if size_str.trim().is_empty() {
-                return Err(ServerError::BadRequest("Parameter 'size' cannot be empty".into()));
-            }
-
-            let size = size_str
-                .parse::<usize>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'size': {}", size_str)))?;
-            let seed = seed_str
-                .parse::<u64>()
-                .map_err(|_| ServerError::BadRequest(format!("Invalid integer value for 'seed': {}", seed_str)))?;
-
-            if size == 0 {
-                return Err(ServerError::BadRequest("Parameter 'size' must be greater than 0".into()));
-            }
-            if size > 1000 {
-                return Err(ServerError::BadRequest("Matrix size too large (max 1000)".into()));
-            }
-
-            let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(5000);
-
-            if let Some(result) = run_with_timeout(timeout_ms, move || {
-                matrixmul(size, seed)
-            }) {
-                let ((hash, calc_elapsed), timeout_elapsed) = result;
-
-                let json = format!(
-                    "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
-                    size, seed, hash, calc_elapsed, timeout_elapsed
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            } else {
-                let mut params = std::collections::HashMap::new();
-                params.insert("size".into(), size.to_string());
-                params.insert("seed".into(), seed.to_string());
-
-                let job_id = job_manager.submit("matrixmul", params, true, Priority::Normal)
-                    .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
-
-                let json = format!(
-                    "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-                    size, seed, timeout_ms, job_id
-                );
-
-                Ok(Response::new(OK)
-                    .set_header("Content-Type", "application/json")
-                    .with_body(json))
-            }
-        }
     })));
 
     // /sortfile?name=FILE&algo=merge|quick
@@ -932,11 +671,9 @@ pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
         }
     })));
 
-    // job routes are registered from the `jobs` submodule
-    builder = super::jobs::register(builder, job_manager.clone());
-
-
-
+    // Routes from other modules
+    builder = jobs::register(builder, job_manager.clone());
+    builder = cpu_bound::register(builder, job_manager.clone());
     builder.build()
 }
 
