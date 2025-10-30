@@ -11,6 +11,8 @@ use crate::utils::{
     }
 };
 
+use crate::jobs::executables;
+
 pub struct PoolMetrics {
     pub queue_lengths: (usize, usize, usize),
     pub worker_metrics: Arc<WorkerMetrics>,
@@ -22,8 +24,6 @@ pub struct JobManager {
     pub jobs: Arc<Mutex<HashMap<String, Arc<Job>>>>,
     pub persist_path: PathBuf,
 }
-
-use crate::jobs::executables;
 
 impl JobManager {
     pub fn new(cpu_workers: usize, io_workers: usize) -> Arc<Self> {
@@ -144,21 +144,18 @@ impl JobManager {
         }
 
         let out: Result<String, String> = match job.task.as_str() {
-            // CPU-bound executables
             "isprime" => executables::is_prime::run(&job.params),
             "factor" => executables::factor::run(&job.params),
             "pi" => executables::pi::run(&job.params),
             "matrixmul" => executables::matrixmul::run(&job.params),
             "mandelbrot" => executables::mandelbrot::run(&job.params),
 
-            // IO-bound executables
             "sortfile" => executables::sort_file::run(&job.params),
             "wordcount" => executables::word_count::run(&job.params),
             "grep" => executables::grep::run(&job.params),
             "compress" => executables::compress::run(&job.params),
             "hashfile" => executables::hash_file::run(&job.params),
 
-            // Unknown task
             _ => Err(format!("Unknown task '{}'", job.task)),
         };
 
