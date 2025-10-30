@@ -41,11 +41,23 @@ impl JobQueue {
                 return job;
             }
 
-            // wait until some queue gets work
             let (lock, cvar) = &*self.normal;
             let q = lock.lock().unwrap();
             let _unused = cvar.wait(q).unwrap();
         }
+    }
+
+    pub fn try_enqueue(&self, job: Arc<Job>) -> Result<(), String> {
+        let total = self.total_len();
+        let max = std::env::var("JOB_QUEUE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100);
+        if total >= max {
+            return Err("QueueFull".into());
+        }
+        self.enqueue(job);
+        Ok(())
     }
 
     fn try_pop(&self, queue: &Arc<(Mutex<VecDeque<Arc<Job>>>, Condvar)>) -> Option<Arc<Job>> {

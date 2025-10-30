@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, path::PathBuf, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use crate::jobs::{
     job::{Job, JobStatus, Priority},
-    persistence::{save_job_state, load_job_states},
+    persistence::{save_job_state, load_job_states, remove_job_state},
     workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
@@ -70,8 +70,15 @@ impl JobManager {
             .unwrap_or(100);
 
         let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
-        if queue.total_len() >= queue_max {
-            return Err("QueueFull".into());
+        let queue_type = if is_cpu { "CPU" } else { "IO" };
+
+        let total_len = queue.total_len();
+        if total_len >= queue_max {
+            eprintln!(
+                "[JobManager] Rejected job for task '{}' — {} queue full ({} >= {})",
+                task, queue_type, total_len, queue_max
+            );
+            return Err(format!("QueueFull: {} pool is at capacity", queue_type));
         }
 
         let timeout_secs = if is_cpu {
@@ -101,7 +108,15 @@ impl JobManager {
 
         save_job_state(&job, &self.persist_path);
 
-        queue.enqueue(job);
+        if let Err(_) = queue.try_enqueue(job.clone()) {
+            eprintln!(
+                "[JobManager] enqueue failed: {} queue full while adding '{}'",
+                queue_type, task
+            );
+            self.jobs.lock().unwrap().remove(&id);
+            remove_job_state(&id, &self.persist_path);
+            return Err(format!("QueueFull: {} pool is at capacity", queue_type));
+        }
 
         Ok(id)
     }
