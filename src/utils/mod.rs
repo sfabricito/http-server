@@ -11,6 +11,7 @@ pub mod timeout;
 pub mod cpu {
     pub mod is_prime;
     pub mod factor;
+    pub mod pi;
     pub mod mandelbrot;
     pub mod matrixmul;
 }

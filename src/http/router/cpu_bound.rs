@@ -20,6 +20,7 @@ use crate::utils::{
         is_prime::{self, PrimeMethod},
         factor::factorize,
         matrixmul::matrixmul,
+        pi::pi_number,
         mandelbrot::mandelbrot
     },
     timeout::run_with_timeout   
@@ -125,6 +126,63 @@ impl RequestHandlerStrategy for FactorHandler {
     }
 }
 
+/// /pi?digits=D
+pub struct PiHandler {
+    pub job_manager: Arc<JobManager>,
+}
+
+impl RequestHandlerStrategy for PiHandler {
+    fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
+        use crate::utils::cpu::pi::pi_number;
+
+        // Extract query parameter
+        let digits_str = req.query_param("digits")
+            .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'digits'".into()))?;
+
+        let digits = digits_str
+            .parse::<usize>()
+            .map_err(|_| ServerError::BadRequest(format!("Invalid digits value: {}", digits_str)))?;
+
+        // if digits == 0 || digits > 5000 {
+        //     return Err(ServerError::BadRequest("Digits must be between 1 and 5000".into()));
+        // }
+
+        let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5000);
+
+        // Try direct computation (best effort)
+        if let Some((result, elapsed)) = run_with_timeout(timeout_ms, move || pi_number(digits)) {
+            let json = format!(
+                "{{\"digits\": {}, \"pi\": \"{}\", \"elapsed_ms\": {}}}",
+                digits, result, elapsed
+            );
+
+            return Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json));
+        }
+
+        // Fallback: submit as async job
+        let mut params = HashMap::new();
+        params.insert("digits".into(), digits.to_string());
+        params.insert("algo".into(), "chudnovsky".into());
+
+        let job_id = self.job_manager
+            .submit("pi", params, true, Priority::Normal)
+            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+
+        let json = format!(
+            "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+            digits, timeout_ms, job_id
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
+    }
+}
 
 /// /matrixmul?size=N&seed=S
 pub struct MatrixMulHandler {
@@ -147,10 +205,11 @@ impl RequestHandlerStrategy for MatrixMulHandler {
         }
 
         let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(5000);
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5000);
 
-        if let Some(result) = run_with_timeout(timeout_ms, move || matrixmul(size, seed)) {
-            let ((hash, elapsed_calc), total_elapsed) = result;
+        if let Some(((hash, elapsed_calc), total_elapsed)) = run_with_timeout(timeout_ms, move || matrixmul(size, seed)) {
             let json = format!(
                 "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
                 size, seed, hash, elapsed_calc, total_elapsed
@@ -163,19 +222,21 @@ impl RequestHandlerStrategy for MatrixMulHandler {
         let mut params = HashMap::new();
         params.insert("size".into(), size.to_string());
         params.insert("seed".into(), seed.to_string());
-        let job_id = self.job_manager.submit("matrixmul", params, true, Priority::Normal)
+
+        let job_id = self.job_manager
+            .submit("matrixmul", params, true, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
             "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
             size, seed, timeout_ms, job_id
         );
+
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")
             .with_body(json))
     }
 }
-
 
 /// /mandelbrot?width=W&height=H&max_iter=I
 pub struct MandelbrotHandler {
@@ -244,6 +305,7 @@ pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> Dis
     builder
         .get("/isprime", Arc::new(IsPrimeHandler { job_manager: job_manager.clone() }))
         .get("/factor", Arc::new(FactorHandler { job_manager: job_manager.clone() }))
+        .get("/pi", Arc::new(PiHandler { job_manager: job_manager.clone() })) // 👈 Added here
         .get("/matrixmul", Arc::new(MatrixMulHandler { job_manager: job_manager.clone() }))
         .get("/mandelbrot", Arc::new(MandelbrotHandler { job_manager: job_manager.clone() }))
 }
