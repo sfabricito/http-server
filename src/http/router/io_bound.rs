@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
-    router::router::{SimpleHandler, QueryParam},
+    router::router::QueryParam,
     request::HttpRequest,
-    response::{Response, OK},
+    response::{Response, OK, SERVICE_UNAVAILABLE},
     errors::ServerError,
 };
 
@@ -22,9 +22,11 @@ use crate::utils::{
         grep::grep_file,
         hash_file::hash_file,
         compress::compress_file
-    },    
+    },
     timeout::run_with_timeout
 };
+
+const SU_PREFIX: &str = "SERVICE_UNAVAILABLE:";
 
 /// /sortfile?name=FILE&algo=merge|quick
 pub struct SortFileHandler {
@@ -56,27 +58,36 @@ impl RequestHandlerStrategy for SortFileHandler {
                         "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
                         name, algo, file, count, elapsed
                     );
-                    Ok(Response::new(OK)
+                    return Ok(Response::new(OK)
                         .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        .with_body(json));
                 }
-                Err(e) => Err(ServerError::Internal(format!("Sort failed: {}", e))),
+                Err(e) => return Err(ServerError::Internal(format!("Sort failed: {}", e))),
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("algo".into(), algo.clone());
+        }
 
-            let job_id = self.job_manager.submit("sortfile", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("algo".into(), algo.clone());
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, algo, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json))
+        match self.job_manager.submit("sortfile", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
         }
     }
 }
@@ -105,26 +116,35 @@ impl RequestHandlerStrategy for WordCountHandler {
                         "{{\"file\":\"{}\",\"lines\":{},\"words\":{},\"bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
                         filename, counts.lines, counts.words, counts.bytes, elapsed, total_elapsed
                     );
-                    Ok(Response::new(OK)
+                    return Ok(Response::new(OK)
                         .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        .with_body(json));
                 }
-                Err(e) => Err(ServerError::Internal(format!("Wordcount failed: {}", e))),
+                Err(e) => return Err(ServerError::Internal(format!("Wordcount failed: {}", e))),
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.clone().to_string());
+        }
 
-            let job_id = self.job_manager.submit("wordcount", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json))
+        match self.job_manager.submit("wordcount", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
         }
     }
 }
@@ -160,26 +180,36 @@ impl RequestHandlerStrategy for GrepHandler {
                         "{{\"file\":\"{}\",\"pattern\":\"{}\",\"matches\":{},\"lines\":[{}],\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
                         name, pattern, res.total_matches, lines_json, res.elapsed_ms, total_elapsed
                     );
-                    Ok(Response::new(OK)
+                    return Ok(Response::new(OK)
                         .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        .with_body(json));
                 }
-                Err(e) => Err(ServerError::Internal(format!("Grep failed: {}", e))),
+                Err(e) => return Err(ServerError::Internal(format!("Grep failed: {}", e))),
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("pattern".into(), pattern.to_string());
-            let job_id = self.job_manager.submit("grep", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        }
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, pattern, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json))
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("pattern".into(), pattern.to_string());
+
+        match self.job_manager.submit("grep", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, pattern, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
         }
     }
 }
@@ -215,26 +245,36 @@ impl RequestHandlerStrategy for CompressHandler {
                         "{{\"file\":\"{}\",\"codec\":\"{}\",\"output\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
                         name, codec, out_name, res.compressed_size, res.elapsed_ms, total_elapsed
                     );
-                    Ok(Response::new(OK)
+                    return Ok(Response::new(OK)
                         .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        .with_body(json));
                 }
-                Err(e) => Err(ServerError::Internal(format!("Compression failed: {}", e))),
+                Err(e) => return Err(ServerError::Internal(format!("Compression failed: {}", e))),
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("codec".into(), codec.to_string());
-            let job_id = self.job_manager.submit("compress", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        }
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, codec, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json))
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("codec".into(), codec.to_string());
+
+        match self.job_manager.submit("compress", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, codec, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
         }
     }
 }
@@ -268,26 +308,36 @@ impl RequestHandlerStrategy for HashFileHandler {
                         "{{\"file\":\"{}\",\"algorithm\":\"{}\",\"hash\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
                         name, algo, res.hash_hex, res.file_size, res.elapsed_ms, total_elapsed
                     );
-                    Ok(Response::new(OK)
+                    return Ok(Response::new(OK)
                         .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        .with_body(json));
                 }
-                Err(e) => Err(ServerError::Internal(format!("Hashing failed: {}", e))),
+                Err(e) => return Err(ServerError::Internal(format!("Hashing failed: {}", e))),
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("algo".into(), algo.to_string());
-            let job_id = self.job_manager.submit("hashfile", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        }
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, algo, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json))
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("algo".into(), algo.to_string());
+
+        match self.job_manager.submit("hashfile", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
         }
     }
 }
