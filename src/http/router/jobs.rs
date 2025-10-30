@@ -198,7 +198,6 @@ impl RequestHandlerStrategy for JobMetricsHandler {
         let pools = self.job_manager.get_metrics();
         let mut pools_json = Vec::new();
 
-        // --- Ensure CPU appears first ---
         let ordered_names = ["cpu", "io"];
 
         for &name in &ordered_names {

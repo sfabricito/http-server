@@ -109,15 +109,8 @@ impl JobManager {
     fn is_cpu_bound(task: &str) -> bool {
         matches!(
             task,
-            "isprime"
-                | "factor"
-                | "pi"
-                | "matrixmul"
-                | "mandelbrot"
-                | "fibonacci"
-                | "reverse"
-                | "toupper"
-                | "random"
+            "isprime" | "factor" | "pi" | "matrixmul" | "mandelbrot" |
+            "fibonacci" | "reverse" | "toupper" | "random"
         )
     }
 
@@ -220,10 +213,6 @@ impl JobManager {
         let previous_jobs = load_job_states(persist_path);
 
         for record in previous_jobs {
-            println!(
-                "[restore] Found job {} (task='{}', state={:?})",
-                record.id, record.task, record.status
-            );
 
             let mut params = HashMap::new();
             if let Some(p) = record.params {
@@ -252,17 +241,20 @@ impl JobManager {
             }
 
             if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
-                let is_cpu = matches!(
-                    record.task.as_str(),
-                    "isprime" | "factor" | "matrixmul" | "mandelbrot"
-                );
+                let is_cpu = JobManager::is_cpu_bound(&record.task);
+                let is_io = JobManager::is_io_bound(&record.task);
 
                 if is_cpu {
                     manager.cpu_pool.queue.enqueue(job.clone());
                     println!("[restore] Re-queued job {} into CPU pool", record.id);
-                } else {
+                } else if is_io {
                     manager.io_pool.queue.enqueue(job.clone());
                     println!("[restore] Re-queued job {} into IO pool", record.id);
+                } else {
+                    println!(
+                        "[restore] Job {} has unknown type (task='{}') — skipped requeue",
+                        record.id, record.task
+                    );
                 }
             } else {
                 println!(
