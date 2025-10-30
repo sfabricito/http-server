@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, path::PathBuf, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use crate::jobs::{
     job::{Job, JobStatus, Priority},
-    persistence::{save_job_state, load_job_states},
+    persistence::{save_job_state, load_job_states, remove_job_state},
     workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
@@ -10,6 +10,8 @@ use crate::utils::{
         sort_file::sort_file,
     }
 };
+
+use crate::jobs::executables;
 
 pub struct PoolMetrics {
     pub queue_lengths: (usize, usize, usize),
@@ -22,8 +24,6 @@ pub struct JobManager {
     pub jobs: Arc<Mutex<HashMap<String, Arc<Job>>>>,
     pub persist_path: PathBuf,
 }
-
-use crate::jobs::executables;
 
 impl JobManager {
     pub fn new(cpu_workers: usize, io_workers: usize) -> Arc<Self> {
@@ -54,70 +54,75 @@ impl JobManager {
     }
 
 
-    pub fn submit(
-        &self,
-        task: &str,
-        params: std::collections::HashMap<String, String>,
-        priority: Priority,
-    ) -> Result<String, String> {
-        use std::time::Duration;
-        use std::env;
+pub fn submit(
+    &self,
+    task: &str,
+    params: std::collections::HashMap<String, String>,
+    priority: Priority,
+) -> Result<String, String> {
+    use std::time::Duration;
+    use std::env;
 
-        let is_cpu = Self::is_cpu_bound(task);
-        let queue_max = env::var("JOB_QUEUE_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100);
+    let is_cpu = Self::is_cpu_bound(task);
+    let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
+    let queue_type = if is_cpu { "CPU" } else { "IO" };
 
-        let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
-        if queue.total_len() >= queue_max {
-            return Err("QueueFull".into());
-        }
+    let timeout_secs = if is_cpu {
+        env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+    } else {
+        env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
+    };
 
-        let timeout_secs = if is_cpu {
-            env::var("CPU_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60)
-        } else {
-            env::var("IO_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(120)
-        };
+    let job = Arc::new(Job::with_priority(
+        task,
+        params,
+        priority,
+        Duration::from_secs(timeout_secs),
+    ));
+    let id = job.id.clone();
 
-        let job = Arc::new(Job::with_priority(
-            task,
-            params,
-            priority,
-            Duration::from_secs(timeout_secs),
-        ));
-        let id = job.id.clone();
+    {
+        let mut map = self.jobs.lock().unwrap();
+        map.insert(id.clone(), job.clone());
+    }
 
+    let queue_max = env::var("JOB_QUEUE_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100);
+
+    if let Err(_) = queue.try_enqueue(job.clone(), queue_max) {
         {
-            let mut map = self.jobs.lock().unwrap();
-            map.insert(id.clone(), job.clone());
+            let mut status = job.status.lock().unwrap();
+            *status = JobStatus::Error(format!(
+                "QueueFull: {} pool is at capacity (max={})",
+                queue_type, queue_max
+            ));
+            *job.finished_at.lock().unwrap() = Some(std::time::Instant::now());
+            *job.result.lock().unwrap() = Some(format!(
+                r#"{{"error":"queue_full","pool":"{}","max":{}}}"#,
+                queue_type, queue_max
+            ));
         }
 
         save_job_state(&job, &self.persist_path);
+        eprintln!(
+            "[JobManager] {} queue full — job {} marked as Error and not enqueued",
+            queue_type, id
+        );
 
-        queue.enqueue(job);
-
-        Ok(id)
+        return Ok(id);
     }
+
+    save_job_state(&job, &self.persist_path);
+    Ok(id)
+}
 
     fn is_cpu_bound(task: &str) -> bool {
         matches!(
             task,
-            "isprime"
-                | "factor"
-                | "pi"
-                | "matrixmul"
-                | "mandelbrot"
-                | "fibonacci"
-                | "reverse"
-                | "toupper"
-                | "random"
+            "isprime" | "factor" | "pi" | "matrixmul" | "mandelbrot" |
+            "fibonacci" | "reverse" | "toupper" | "random"
         )
     }
 
@@ -136,21 +141,18 @@ impl JobManager {
         }
 
         let out: Result<String, String> = match job.task.as_str() {
-            // CPU-bound executables
             "isprime" => executables::is_prime::run(&job.params),
             "factor" => executables::factor::run(&job.params),
             "pi" => executables::pi::run(&job.params),
             "matrixmul" => executables::matrixmul::run(&job.params),
             "mandelbrot" => executables::mandelbrot::run(&job.params),
 
-            // IO-bound executables
             "sortfile" => executables::sort_file::run(&job.params),
             "wordcount" => executables::word_count::run(&job.params),
             "grep" => executables::grep::run(&job.params),
             "compress" => executables::compress::run(&job.params),
             "hashfile" => executables::hash_file::run(&job.params),
 
-            // Unknown task
             _ => Err(format!("Unknown task '{}'", job.task)),
         };
 
@@ -220,10 +222,6 @@ impl JobManager {
         let previous_jobs = load_job_states(persist_path);
 
         for record in previous_jobs {
-            println!(
-                "[restore] Found job {} (task='{}', state={:?})",
-                record.id, record.task, record.status
-            );
 
             let mut params = HashMap::new();
             if let Some(p) = record.params {
@@ -252,17 +250,20 @@ impl JobManager {
             }
 
             if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
-                let is_cpu = matches!(
-                    record.task.as_str(),
-                    "isprime" | "factor" | "matrixmul" | "mandelbrot"
-                );
+                let is_cpu = JobManager::is_cpu_bound(&record.task);
+                let is_io = JobManager::is_io_bound(&record.task);
 
                 if is_cpu {
                     manager.cpu_pool.queue.enqueue(job.clone());
                     println!("[restore] Re-queued job {} into CPU pool", record.id);
-                } else {
+                } else if is_io {
                     manager.io_pool.queue.enqueue(job.clone());
                     println!("[restore] Re-queued job {} into IO pool", record.id);
+                } else {
+                    println!(
+                        "[restore] Job {} has unknown type (task='{}') — skipped requeue",
+                        record.id, record.task
+                    );
                 }
             } else {
                 println!(

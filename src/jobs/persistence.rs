@@ -1,17 +1,27 @@
-use std::{fs::{self, OpenOptions}, io::{BufRead, BufReader, Write}, path::Path, time::Instant};
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    sync::Mutex,
+};
 use crate::jobs::job::{Job, JobStatus, Priority};
 use serde_json::{json, Value, Map};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref FILE_LOCK: Mutex<()> = Mutex::new(());
+}
 
 pub fn save_job_state(job: &Job, path: &Path) {
+    let _guard = FILE_LOCK.lock().unwrap();
+
     let snapshot = json!({
         "id": job.id,
         "task": job.task,
         "priority": format!("{:?}", job.priority),
         "status": format!("{:?}", *job.status.lock().unwrap()),
         "progress": *job.progress.lock().unwrap(),
-
         "result": job.result.lock().unwrap().clone().unwrap_or_default(),
-
         "params": job.params,
         "created_at_ms": job.created_at.elapsed().as_millis(),
         "started_at": job.started_at.lock().unwrap().map(|t| t.elapsed().as_millis()),
@@ -65,7 +75,9 @@ pub struct SavedJob {
 }
 
 pub fn load_job_states(path: &Path) -> Vec<SavedJob> {
+    let _guard = FILE_LOCK.lock().unwrap();
     let mut restored = Vec::new();
+
     if !path.exists() {
         return restored;
     }
@@ -96,8 +108,8 @@ pub fn load_job_states(path: &Path) -> Vec<SavedJob> {
                     };
 
                     let result = val.get("result")
-                    .and_then(|r| r.as_str())
-                    .map(|s| s.to_string());
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string());
 
                     restored.push(SavedJob {
                         id,
@@ -113,4 +125,38 @@ pub fn load_job_states(path: &Path) -> Vec<SavedJob> {
     }
 
     restored
+}
+
+pub fn remove_job_state(job_id: &str, path: &Path) {
+    let _guard = FILE_LOCK.lock().unwrap();
+
+    if !path.exists() {
+        return;
+    }
+
+    let mut remaining = Vec::new();
+
+    if let Ok(file) = fs::File::open(path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if let Ok(val) = serde_json::from_str::<Value>(&line) {
+                if val.get("id").and_then(|v| v.as_str()) != Some(job_id) {
+                    remaining.push(val);
+                }
+            }
+        }
+    }
+
+    let tmp_path = path.with_extension("tmp");
+    if let Ok(mut file) = OpenOptions::new().create(true).write(true).truncate(true).open(&tmp_path)
+    {
+        for val in &remaining {
+            if let Err(e) = writeln!(file, "{}", val) {
+                eprintln!("[persistence] failed to rewrite state file: {}", e);
+            }
+        }
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            eprintln!("[persistence] failed to replace state file: {}", e);
+        }
+    }
 }

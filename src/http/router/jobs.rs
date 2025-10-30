@@ -196,27 +196,47 @@ pub struct JobMetricsHandler {
 impl RequestHandlerStrategy for JobMetricsHandler {
     fn handle(&self, _req: &HttpRequest) -> Result<Response, ServerError> {
         let pools = self.job_manager.get_metrics();
-        
         let mut pools_json = Vec::new();
-        
-        for (name, metrics) in pools {
-            let queue_lengths = metrics.queue_lengths;
-            let worker_metrics = metrics.worker_metrics;
-            
-            pools_json.push(format!(
-                r#""{}":{{"queue_size":{{"high":{}, "normal":{}, "low":{}}},
-                   "workers":{{"active":{}, "total":{}}},
-                   "timings":{{"avg_wait_ms":{}, "avg_process_ms":{},
-                             "std_dev_wait_ms":{:.2}, "std_dev_process_ms":{:.2}}}}}"#,
-                name,
-                queue_lengths.0, queue_lengths.1, queue_lengths.2,
-                worker_metrics.active_workers.lock().unwrap(),
-                worker_metrics.total_workers,
-                worker_metrics.avg_wait.lock().unwrap().as_millis(),
-                worker_metrics.avg_exec.lock().unwrap().as_millis(),
-                0.0, // TODO std dev not yet implemented
-                0.0  // TODO std dev not yet implemented
-            ));
+
+        let ordered_names = ["cpu", "io"];
+
+        for &name in &ordered_names {
+            if let Some(metrics) = pools.get(name) {
+                let queue_lengths = metrics.queue_lengths;
+                let wm = &metrics.worker_metrics;
+
+                let active = *wm.active_workers.lock().unwrap();
+                let total = wm.total_workers;
+                let total_jobs = *wm.total_jobs.lock().unwrap();
+
+                let avg_wait = wm.avg_wait.lock().unwrap().as_millis();
+                let avg_exec = wm.avg_exec.lock().unwrap().as_millis();
+                let avg_total = wm.avg_total.lock().unwrap().as_millis();
+
+                let std_wait = wm.std_wait_ms();
+                let std_exec = wm.std_exec_ms();
+
+                pools_json.push(format!(
+                    r#""{}":{{
+                        "queue_size": {{"high": {}, "normal": {}, "low": {}}},
+                        "workers": {{"active": {}, "total": {}}},
+                        "jobs": {{"total": {}}},
+                        "timings": {{
+                            "avg_wait_ms": {},
+                            "avg_exec_ms": {},
+                            "avg_total_ms": {},
+                            "std_dev_wait_ms": {:.2},
+                            "std_dev_exec_ms": {:.2}
+                        }}
+                    }}"#,
+                    name,
+                    queue_lengths.0, queue_lengths.1, queue_lengths.2,
+                    active, total,
+                    total_jobs,
+                    avg_wait, avg_exec, avg_total,
+                    std_wait, std_exec
+                ));
+            }
         }
 
         let json = format!("{{\"pools\":{{{}}}}}", pools_json.join(","));
@@ -226,6 +246,7 @@ impl RequestHandlerStrategy for JobMetricsHandler {
             .with_body(json))
     }
 }
+
 
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
     builder

@@ -1,69 +1,89 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
-use super::job::{Job, Priority};
+use std::sync::{Arc, Mutex, Condvar};
+use std::time::Duration;
+
+use crate::jobs::job::{Job, Priority};
 
 pub struct JobQueue {
-    high: Arc<(Mutex<VecDeque<Arc<Job>>>, Condvar)>,
-    normal: Arc<(Mutex<VecDeque<Arc<Job>>>, Condvar)>,
-    low: Arc<(Mutex<VecDeque<Arc<Job>>>, Condvar)>,
+    inner: Mutex<JobQueueInner>,
+    cv: Condvar,
+}
+
+struct JobQueueInner {
+    high: VecDeque<Arc<Job>>,
+    normal: VecDeque<Arc<Job>>,
+    low: VecDeque<Arc<Job>>,
 }
 
 impl JobQueue {
     pub fn new() -> Self {
         Self {
-            high: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-            normal: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-            low: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+            inner: Mutex::new(JobQueueInner {
+                high: VecDeque::new(),
+                normal: VecDeque::new(),
+                low: VecDeque::new(),
+            }),
+            cv: Condvar::new(),
         }
+    }
+
+    pub fn try_enqueue(&self, job: Arc<Job>, max: usize) -> Result<(), String> {
+        let mut q = self.inner.lock().unwrap();
+
+        let total = q.high.len() + q.normal.len() + q.low.len();
+        if total >= max {
+            return Err("QueueFull".into());
+        }
+
+        match job.priority {
+            Priority::High => q.high.push_back(job),
+            Priority::Normal => q.normal.push_back(job),
+            Priority::Low => q.low.push_back(job),
+        }
+
+        self.cv.notify_one();
+        Ok(())
     }
 
     pub fn enqueue(&self, job: Arc<Job>) {
-        let queue = match job.priority {
-            Priority::High => &self.high,
-            Priority::Normal => &self.normal,
-            Priority::Low => &self.low,
-        };
-        let (lock, cvar) = &**queue;
-        let mut q = lock.lock().unwrap();
-        q.push_back(job);
-        cvar.notify_one();
+        let mut q = self.inner.lock().unwrap();
+        match job.priority {
+            Priority::High => q.high.push_back(job),
+            Priority::Normal => q.normal.push_back(job),
+            Priority::Low => q.low.push_back(job),
+        }
+        self.cv.notify_one();
     }
 
     pub fn dequeue(&self) -> Arc<Job> {
+        let mut q = self.inner.lock().unwrap();
+
         loop {
-            if let Some(job) = self.try_pop(&self.high) {
+            if let Some(job) = q.high.pop_front() {
                 return job;
             }
-            if let Some(job) = self.try_pop(&self.normal) {
+            if let Some(job) = q.normal.pop_front() {
                 return job;
             }
-            if let Some(job) = self.try_pop(&self.low) {
+            if let Some(job) = q.low.pop_front() {
                 return job;
             }
 
-            // wait until some queue gets work
-            let (lock, cvar) = &*self.normal;
-            let q = lock.lock().unwrap();
-            let _unused = cvar.wait(q).unwrap();
+            q = self.cv.wait_timeout(q, Duration::from_millis(500)).unwrap().0;
         }
     }
 
-    fn try_pop(&self, queue: &Arc<(Mutex<VecDeque<Arc<Job>>>, Condvar)>) -> Option<Arc<Job>> {
-        let (lock, _) = &**queue;
-        let mut q = lock.lock().unwrap();
-        q.pop_front()
-    }
-
     pub fn len_by_priority(&self) -> (usize, usize, usize) {
-        (
-            self.high.0.lock().unwrap().len(),
-            self.normal.0.lock().unwrap().len(),
-            self.low.0.lock().unwrap().len(),
-        )
+        let q = self.inner.lock().unwrap();
+        (q.high.len(), q.normal.len(), q.low.len())
     }
 
     pub fn total_len(&self) -> usize {
         let (h, n, l) = self.len_by_priority();
         h + n + l
+    }
+
+    pub fn queue_lengths(&self) -> (usize, usize, usize) {
+        self.len_by_priority()
     }
 }
