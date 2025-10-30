@@ -67,7 +67,7 @@ impl RequestHandlerStrategy for SortFileHandler {
             params.insert("name".into(), name.to_string());
             params.insert("algo".into(), algo.clone());
 
-            let job_id = self.job_manager.submit("sortfile", params, false, Priority::Normal)
+            let job_id = self.job_manager.submit("sortfile", params, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -115,7 +115,7 @@ impl RequestHandlerStrategy for WordCountHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.clone().to_string());
 
-            let job_id = self.job_manager.submit("wordcount", params, false, Priority::Normal)
+            let job_id = self.job_manager.submit("wordcount", params, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -170,7 +170,7 @@ impl RequestHandlerStrategy for GrepHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("pattern".into(), pattern.to_string());
-            let job_id = self.job_manager.submit("grep", params, false, Priority::Normal)
+            let job_id = self.job_manager.submit("grep", params, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -225,7 +225,7 @@ impl RequestHandlerStrategy for CompressHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("codec".into(), codec.to_string());
-            let job_id = self.job_manager.submit("compress", params, false, Priority::Normal)
+            let job_id = self.job_manager.submit("compress", params, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(
@@ -278,7 +278,7 @@ impl RequestHandlerStrategy for HashFileHandler {
             let mut params = HashMap::new();
             params.insert("name".into(), name.to_string());
             params.insert("algo".into(), algo.to_string());
-            let job_id = self.job_manager.submit("hashfile", params, false, Priority::Normal)
+            let job_id = self.job_manager.submit("hashfile", params, Priority::Normal)
                 .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
             let json = format!(

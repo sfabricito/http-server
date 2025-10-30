@@ -65,7 +65,7 @@ impl RequestHandlerStrategy for IsPrimeHandler {
         params.insert("n".into(), n.to_string());
         params.insert("method".into(), method_name.to_string());
 
-        let job_id = self.job_manager.submit("isprime", params, true, Priority::Normal)
+        let job_id = self.job_manager.submit("isprime", params, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
@@ -113,7 +113,7 @@ impl RequestHandlerStrategy for FactorHandler {
 
         let mut params = HashMap::new();
         params.insert("n".into(), n.to_string());
-        let job_id = self.job_manager.submit("factor", params, true, Priority::Normal)
+        let job_id = self.job_manager.submit("factor", params, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
@@ -170,7 +170,7 @@ impl RequestHandlerStrategy for PiHandler {
         params.insert("algo".into(), "chudnovsky".into());
 
         let job_id = self.job_manager
-            .submit("pi", params, true, Priority::Normal)
+            .submit("pi", params, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
@@ -224,7 +224,7 @@ impl RequestHandlerStrategy for MatrixMulHandler {
         params.insert("seed".into(), seed.to_string());
 
         let job_id = self.job_manager
-            .submit("matrixmul", params, true, Priority::Normal)
+            .submit("matrixmul", params, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
@@ -288,7 +288,7 @@ impl RequestHandlerStrategy for MandelbrotHandler {
         params.insert("height".into(), height.to_string());
         params.insert("max_iter".into(), max_iter.to_string());
 
-        let job_id = self.job_manager.submit("mandelbrot", params, true, Priority::Normal)
+        let job_id = self.job_manager.submit("mandelbrot", params, Priority::Normal)
             .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
         let json = format!(
