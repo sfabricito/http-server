@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
-    router::router::{SimpleHandler, QueryParam},
+    router::router::QueryParam,
     request::HttpRequest,
-    response::{Response, OK},
+    response::{Response, OK, SERVICE_UNAVAILABLE},
     errors::ServerError,
 };
 
@@ -23,8 +23,10 @@ use crate::utils::{
         pi::pi_number,
         mandelbrot::mandelbrot
     },
-    timeout::run_with_timeout   
+    timeout::run_with_timeout
 };
+
+const SU_PREFIX: &str = "SERVICE_UNAVAILABLE:";
 
 /// /isprime?n=NUM
 pub struct IsPrimeHandler {
@@ -65,16 +67,25 @@ impl RequestHandlerStrategy for IsPrimeHandler {
         params.insert("n".into(), n.to_string());
         params.insert("method".into(), method_name.to_string());
 
-        let job_id = self.job_manager.submit("isprime", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            n, timeout_ms, job_id
-        );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        match self.job_manager.submit("isprime", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
+        }
     }
 }
 
@@ -113,16 +124,25 @@ impl RequestHandlerStrategy for FactorHandler {
 
         let mut params = HashMap::new();
         params.insert("n".into(), n.to_string());
-        let job_id = self.job_manager.submit("factor", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            n, timeout_ms, job_id
-        );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        match self.job_manager.submit("factor", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
+        }
     }
 }
 
@@ -133,8 +153,6 @@ pub struct PiHandler {
 
 impl RequestHandlerStrategy for PiHandler {
     fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
-        use crate::utils::cpu::pi::pi_number;
-
         // Extract query parameter
         let digits_str = req.query_param("digits")
             .ok_or_else(|| ServerError::BadRequest("Missing query parameter 'digits'".into()))?;
@@ -142,10 +160,6 @@ impl RequestHandlerStrategy for PiHandler {
         let digits = digits_str
             .parse::<usize>()
             .map_err(|_| ServerError::BadRequest(format!("Invalid digits value: {}", digits_str)))?;
-
-        // if digits == 0 || digits > 5000 {
-        //     return Err(ServerError::BadRequest("Digits must be between 1 and 5000".into()));
-        // }
 
         let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
             .ok()
@@ -169,18 +183,25 @@ impl RequestHandlerStrategy for PiHandler {
         params.insert("digits".into(), digits.to_string());
         params.insert("algo".into(), "chudnovsky".into());
 
-        let job_id = self.job_manager
-            .submit("pi", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            digits, timeout_ms, job_id
-        );
-
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        match self.job_manager.submit("pi", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    digits, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
+        }
     }
 }
 
@@ -223,18 +244,26 @@ impl RequestHandlerStrategy for MatrixMulHandler {
         params.insert("size".into(), size.to_string());
         params.insert("seed".into(), seed.to_string());
 
-        let job_id = self.job_manager
-            .submit("matrixmul", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        match self.job_manager.submit("matrixmul", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    size, seed, timeout_ms, job_id
+                );
 
-        let json = format!(
-            "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            size, seed, timeout_ms, job_id
-        );
-
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
+        }
     }
 }
 
@@ -288,16 +317,25 @@ impl RequestHandlerStrategy for MandelbrotHandler {
         params.insert("height".into(), height.to_string());
         params.insert("max_iter".into(), max_iter.to_string());
 
-        let job_id = self.job_manager.submit("mandelbrot", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            width, height, max_iter, timeout_ms, job_id
-        );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        match self.job_manager.submit("mandelbrot", params, Priority::Normal) {
+            Ok(job_id) => {
+                let json = format!(
+                    "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    width, height, max_iter, timeout_ms, job_id
+                );
+                Ok(Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+            Err(e) if e.starts_with(SU_PREFIX) => {
+                let body = &e[SU_PREFIX.len()..];
+                Ok(Response::new(SERVICE_UNAVAILABLE)
+                    .set_header("Content-Type", "application/json")
+                    .set_header("Retry-After", "1")
+                    .with_body(body.to_string()))
+            }
+            Err(e) => Err(ServerError::Internal(format!("Job submit failed: {}", e))),
+        }
     }
 }
 
@@ -305,7 +343,7 @@ pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> Dis
     builder
         .get("/isprime", Arc::new(IsPrimeHandler { job_manager: job_manager.clone() }))
         .get("/factor", Arc::new(FactorHandler { job_manager: job_manager.clone() }))
-        .get("/pi", Arc::new(PiHandler { job_manager: job_manager.clone() })) // 👈 Added here
+        .get("/pi", Arc::new(PiHandler { job_manager: job_manager.clone() }))
         .get("/matrixmul", Arc::new(MatrixMulHandler { job_manager: job_manager.clone() }))
         .get("/mandelbrot", Arc::new(MandelbrotHandler { job_manager: job_manager.clone() }))
 }

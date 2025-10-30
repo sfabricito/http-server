@@ -54,69 +54,73 @@ impl JobManager {
     }
 
 
-pub fn submit(
-    &self,
-    task: &str,
-    params: std::collections::HashMap<String, String>,
-    priority: Priority,
-) -> Result<String, String> {
-    use std::time::Duration;
-    use std::env;
+    pub fn submit(
+        &self,
+        task: &str,
+        params: std::collections::HashMap<String, String>,
+        priority: Priority,
+    ) -> Result<String, String> {
+        use std::time::Duration;
+        use std::env;
 
-    let is_cpu = Self::is_cpu_bound(task);
-    let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
-    let queue_type = if is_cpu { "CPU" } else { "IO" };
+        let is_cpu = Self::is_cpu_bound(task);
+        let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
+        let queue_type = if is_cpu { "CPU" } else { "IO" };
 
-    let timeout_secs = if is_cpu {
-        env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
-    } else {
-        env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
-    };
+        let timeout_secs = if is_cpu {
+            env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+        } else {
+            env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
+        };
 
-    let job = Arc::new(Job::with_priority(
-        task,
-        params,
-        priority,
-        Duration::from_secs(timeout_secs),
-    ));
-    let id = job.id.clone();
+        let job = Arc::new(Job::with_priority(
+            task,
+            params,
+            priority,
+            Duration::from_secs(timeout_secs),
+        ));
+        let id = job.id.clone();
 
-    {
-        let mut map = self.jobs.lock().unwrap();
-        map.insert(id.clone(), job.clone());
-    }
-
-    let queue_max = env::var("JOB_QUEUE_MAX")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100);
-
-    if let Err(_) = queue.try_enqueue(job.clone(), queue_max) {
         {
-            let mut status = job.status.lock().unwrap();
-            *status = JobStatus::Error(format!(
-                "QueueFull: {} pool is at capacity (max={})",
+            let mut map = self.jobs.lock().unwrap();
+            map.insert(id.clone(), job.clone());
+        }
+
+        let queue_max = env::var("JOB_QUEUE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100);
+
+        if let Err(_) = queue.try_enqueue(job.clone(), queue_max) {
+            {
+                let mut status = job.status.lock().unwrap();
+                *status = JobStatus::Error(format!(
+                    "QueueFull: {} pool is at capacity (max={})",
+                    queue_type, queue_max
+                ));
+                *job.finished_at.lock().unwrap() = Some(std::time::Instant::now());
+                *job.result.lock().unwrap() = Some(format!(
+                    r#"{{"error":"queue_full","pool":"{}","max":{}}}"#,
+                    queue_type, queue_max
+                ));
+            }
+
+            save_job_state(&job, &self.persist_path);
+
+            let json = format!(
+                r#"{{"error":"queue_full","pool":"{}","max":{},"retry_after_ms":1500}}"#,
                 queue_type, queue_max
-            ));
-            *job.finished_at.lock().unwrap() = Some(std::time::Instant::now());
-            *job.result.lock().unwrap() = Some(format!(
-                r#"{{"error":"queue_full","pool":"{}","max":{}}}"#,
-                queue_type, queue_max
-            ));
+            );
+
+            return Err(format!("SERVICE_UNAVAILABLE:{}", json));
         }
 
         save_job_state(&job, &self.persist_path);
-        eprintln!(
-            "[JobManager] {} queue full — job {} marked as Error and not enqueued",
-            queue_type, id
-        );
+        queue.enqueue(job);
 
-        return Ok(id);
+        Ok(id)
     }
 
-    save_job_state(&job, &self.persist_path);
-    Ok(id)
-}
 
     fn is_cpu_bound(task: &str) -> bool {
         matches!(
