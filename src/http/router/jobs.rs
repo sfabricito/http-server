@@ -128,22 +128,32 @@ impl RequestHandlerStrategy for JobSubmitHandler {
             return Err(ServerError::BadRequest("Parameter 'task' cannot be empty".into()));
         }
 
+        let priority_str = req.query_param("priority").unwrap_or("normal");
+        let priority = match priority_str.to_lowercase().as_str() {
+            "low" => Priority::Low,
+            "high" => Priority::High,
+            "normal" | _ => Priority::Normal,
+        };
+
         let mut params = HashMap::new();
         for pair in req.query.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
-                if k != "task" {
+                if k != "task" && k != "priority" {
                     params.insert(k.to_string(), v.to_string());
                 }
             }
         }
 
-        let job_id = self.job_manager.submit(task, params, true, Priority::Normal)
+        let job_id = self.job_manager
+            .submit(task, params, priority)
             .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
 
         let json = format!(
-            "{{\"job_id\":\"{}\",\"status\":\"queued\"}}",
-            job_id
+            "{{\"job_id\":\"{}\",\"status\":\"queued\",\"priority\":\"{}\"}}",
+            job_id, priority_str
         );
+
+        println!("Job submitted: id='{}', task='{}' ", job_id, task);
 
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")

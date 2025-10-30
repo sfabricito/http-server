@@ -58,9 +58,12 @@ impl JobManager {
         &self,
         task: &str,
         params: std::collections::HashMap<String, String>,
-        is_cpu: bool,
         priority: Priority,
     ) -> Result<String, String> {
+        use std::time::Duration;
+        use std::env;
+
+        let is_cpu = Self::is_cpu_bound(task);
         let queue_max = env::var("JOB_QUEUE_MAX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -72,12 +75,23 @@ impl JobManager {
         }
 
         let timeout_secs = if is_cpu {
-            env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+            env::var("CPU_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60)
         } else {
-            env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
+            env::var("IO_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(120)
         };
 
-        let job = Arc::new(Job::with_priority(task, params, priority, std::time::Duration::from_secs(timeout_secs)));
+        let job = Arc::new(Job::with_priority(
+            task,
+            params,
+            priority,
+            Duration::from_secs(timeout_secs),
+        ));
         let id = job.id.clone();
 
         {
@@ -90,6 +104,29 @@ impl JobManager {
         queue.enqueue(job);
 
         Ok(id)
+    }
+
+    fn is_cpu_bound(task: &str) -> bool {
+        matches!(
+            task,
+            "isprime"
+                | "factor"
+                | "pi"
+                | "matrixmul"
+                | "mandelbrot"
+                | "fibonacci"
+                | "reverse"
+                | "toupper"
+                | "random"
+        )
+    }
+
+    fn is_io_bound(task: &str) -> bool {
+        matches!(
+            task,
+            "sortfile" | "wordcount" | "grep" | "compress"| 
+            "hashfile" | "createfile" | "deletefile" | "timestamp"
+        )
     }
 
     pub fn execute_job(&self, job: Arc<Job>) {
