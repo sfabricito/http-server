@@ -28,9 +28,17 @@ fn fibonacci_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     let fib = math::fibonacci(n);
     let json = format!("{{\"num\": {}, \"fibonacci\": {}}}", n, fib);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
+}
+
+fn with_worker_pid(resp: Response) -> Response {
+    if let Some(pid) = worker_pool::current_worker_pid() {
+        resp.set_header("X-Worker-Pid", &pid.to_string())
+    } else {
+        resp
+    }
 }
 
 // /toupper?text=abcd
@@ -44,9 +52,9 @@ fn toupper_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     let upper = text::to_upper(text);
     let json = format!("{{\"original\": \"{}\", \"upper\": \"{}\"}}", text, upper);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /reverse?text=abcdef
@@ -60,9 +68,9 @@ fn reverse_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     let reversed = text::reverse(text);
     let json = format!("{{\"original\": \"{}\", \"reversed\": \"{}\"}}", text, reversed);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /hash?text=someinput
@@ -76,18 +84,18 @@ fn hash_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     let hash_val = hash::hash_text(text);
     let json = format!("{{\"text\": \"{}\", \"sha256\": \"{}\"}}", text, hash_val);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /timestamp
 fn timestamp_handler(_req: &HttpRequest) -> Result<Response, ServerError> {
     let ts = time::timestamp();
     let json = format!("{{\"timestamp\": \"{}\"}}", ts);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /simulate?seconds=s&task=name
@@ -105,9 +113,9 @@ fn simulate_handler(req: &HttpRequest) -> Result<Response, ServerError> {
         "{{\"task\": \"{}\", \"duration_seconds\": {}, \"result\": \"{}\"}}",
         task, secs, result
     );
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /createfile?name=filename&content=text&repeat=x
@@ -133,9 +141,9 @@ fn createfile_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     file::create_file(name, content, repeat)?;
     let json = format!("{{\"file\": \"{}\", \"content\": \"{}\", \"repeat\": {}}}", name, content, repeat);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /deletefile?name=filename
@@ -146,18 +154,18 @@ fn deletefile_handler(req: &HttpRequest) -> Result<Response, ServerError> {
     match file::delete_file(name) {
         Ok(msg) => {
             let json = format!("{{\"status\": \"ok\", \"message\": \"{}\"}}", msg);
-            Ok(Response::new(OK)
+            Ok(with_worker_pid(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)))
         }
         Err(e) => {
             let json = format!(
                 "{{\"status\": \"error\", \"message\": \"Failed to delete '{}': {}\"}}",
                 name, e
             );
-            Ok(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
+            Ok(with_worker_pid(Response::new(crate::http::response::INTERNAL_SERVER_ERROR)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)))
         }
     }
 }
@@ -187,9 +195,9 @@ fn random_handler(req: &HttpRequest) -> Result<Response, ServerError> {
         "{{\"count\": {}, \"min\": {}, \"max\": {}, \"values\": {:?}}}",
         count, min, max, nums
     );
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /sleep?seconds=s
@@ -202,9 +210,9 @@ fn sleep_handler(req: &HttpRequest) -> Result<Response, ServerError> {
 
     time::sleep(secs);
     let json = format!("{{\"slept_seconds\": {}}}", secs);
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /help
@@ -214,9 +222,9 @@ fn help_handler(_req: &HttpRequest) -> Result<Response, ServerError> {
         "{{\"endpoint\": \"/help\", \"description\": \"Available commands and usage information.\", \"details\": \"{}\"}}",
         help_text.replace('"', "'")
     );
-    Ok(Response::new(OK)
+    Ok(with_worker_pid(Response::new(OK)
         .set_header("Content-Type", "application/json")
-        .with_body(json))
+        .with_body(json)))
 }
 
 // /status
@@ -290,9 +298,9 @@ impl RequestHandlerStrategy for ServerStatusHandler {
             endpoint_workers_json.join(","),
         );
 
-        Ok(Response::new(OK)
+        Ok(with_worker_pid(Response::new(OK)
             .set_header("Content-Type", "application/json")
-            .with_body(json))
+            .with_body(json)))
     }
 }
 

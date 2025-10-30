@@ -16,7 +16,7 @@ use crate::jobs::{
     job::Priority,
     manager::JobManager,
 };
-use crate::worker_pool::ThreadPool;
+use crate::worker_pool::{self, ThreadPool};
 
 use crate::utils::{
     cpu::{
@@ -38,6 +38,15 @@ fn queue_full_response(retry_after_ms: u64) -> Response {
         .set_header("Content-Type", "application/json")
         .set_header("Retry-After", &retry_after_secs.to_string())
         .with_body(format!("{{\"retry_after_ms\":{}}}", retry_after_ms))
+}
+
+fn with_worker_pid(resp: Response, worker_pid: Option<i32>) -> Response {
+    let pid_opt = worker_pid.or_else(|| worker_pool::current_worker_pid());
+    if let Some(pid) = pid_opt {
+        resp.set_header("X-Worker-Pid", &pid.to_string())
+    } else {
+        resp
+    }
 }
 
 impl RequestHandlerStrategy for IsPrimeHandler {
@@ -99,9 +108,12 @@ impl RequestHandlerStrategy for IsPrimeHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -173,9 +185,12 @@ impl RequestHandlerStrategy for FactorHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -250,9 +265,12 @@ impl RequestHandlerStrategy for PiHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -327,9 +345,12 @@ impl RequestHandlerStrategy for MatrixMulHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
@@ -422,9 +443,12 @@ impl RequestHandlerStrategy for MandelbrotHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",

@@ -6,6 +6,7 @@ use crate::jobs::{
     manager::JobManager,
     queue::JobQueue,
 };
+use crate::worker_pool;
 
 #[derive(Default, Clone, Copy)]
 struct RunningStats {
@@ -95,6 +96,7 @@ pub fn spawn_workers(
         let tag = tag.to_string();
 
         thread::spawn(move || loop {
+            worker_pool::register_worker_thread();
             let job = queue.dequeue();
 
             if matches!(*job.status.lock().unwrap(), JobStatus::Canceled) {
@@ -123,9 +125,11 @@ pub fn spawn_workers(
             let (tx, rx) = mpsc::channel();
 
             let handle = thread::spawn(move || {
+                worker_pool::register_worker_thread();
                 let _ = std::panic::catch_unwind(|| {
                     manager_clone.execute_job(job_clone);
                 });
+                worker_pool::clear_worker_thread();
                 let _ = tx.send(());
             });
 

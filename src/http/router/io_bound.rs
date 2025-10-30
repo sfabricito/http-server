@@ -27,7 +27,7 @@ use crate::utils::{
     },
 };
 
-use crate::worker_pool::ThreadPool;
+use crate::worker_pool::{self, ThreadPool};
 
 /// /sortfile?name=FILE&algo=merge|quick
 pub struct SortFileHandler {
@@ -40,6 +40,15 @@ fn queue_full_response(retry_after_ms: u64) -> Response {
         .set_header("Content-Type", "application/json")
         .set_header("Retry-After", &retry_after_secs.to_string())
         .with_body(format!("{{\"retry_after_ms\":{}}}", retry_after_ms))
+}
+
+fn with_worker_pid(resp: Response, worker_pid: Option<i32>) -> Response {
+    let pid_opt = worker_pid.or_else(|| worker_pool::current_worker_pid());
+    if let Some(pid) = pid_opt {
+        resp.set_header("X-Worker-Pid", &pid.to_string())
+    } else {
+        resp
+    }
 }
 
 impl RequestHandlerStrategy for SortFileHandler {
@@ -99,9 +108,12 @@ impl RequestHandlerStrategy for SortFileHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
@@ -174,9 +186,12 @@ impl RequestHandlerStrategy for WordCountHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
@@ -250,9 +265,12 @@ impl RequestHandlerStrategy for GrepHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
@@ -334,9 +352,12 @@ impl RequestHandlerStrategy for CompressHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
@@ -411,9 +432,12 @@ impl RequestHandlerStrategy for HashFileHandler {
         };
 
         match outcome {
-            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json)),
+            BestEffortOutcome::Completed { json, worker_pid } => {
+                let resp = Response::new(OK)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json);
+                Ok(with_worker_pid(resp, worker_pid))
+            }
             BestEffortOutcome::Offloaded { job_id } => {
                 let json = format!(
                     "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",

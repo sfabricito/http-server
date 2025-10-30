@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{
     mpsc, Arc, Mutex,
@@ -5,6 +6,10 @@ use std::sync::{
     OnceLock,
 };
 use std::thread;
+
+thread_local! {
+    static CURRENT_WORKER_PID: Cell<i32> = Cell::new(0);
+}
 
 #[cfg(target_os = "linux")]
 fn gettid() -> i32 {
@@ -44,6 +49,24 @@ static GLOBAL_POOLS: OnceLock<Mutex<HashMap<String, ThreadPool>>> = OnceLock::ne
 
 fn registry() -> &'static Mutex<HashMap<String, ThreadPool>> {
     GLOBAL_POOLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_current_worker_pid(pid: i32) {
+    CURRENT_WORKER_PID.with(|cell| cell.set(pid));
+}
+
+pub fn register_worker_thread() {
+    let pid = gettid();
+    set_current_worker_pid(pid);
+}
+
+pub fn clear_worker_thread() {
+    set_current_worker_pid(0);
+}
+
+pub fn current_worker_pid() -> Option<i32> {
+    let pid = CURRENT_WORKER_PID.with(|cell| cell.get());
+    if pid > 0 { Some(pid) } else { None }
 }
 
 #[derive(Clone)]
@@ -109,6 +132,7 @@ impl ThreadPool {
             let handle = thread::Builder::new()
                 .name(thread_name.clone())
                 .spawn(move || {
+                    register_worker_thread();
                     // record OS thread id
                     let tid = gettid();
                     info.tid.store(tid, Ordering::SeqCst);
@@ -136,6 +160,8 @@ impl ThreadPool {
                             }
                         }
                     }
+
+                    clear_worker_thread();
                 })
                 .expect("Failed to spawn worker thread");
 
