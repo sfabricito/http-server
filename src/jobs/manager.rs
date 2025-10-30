@@ -54,72 +54,69 @@ impl JobManager {
     }
 
 
-    pub fn submit(
-        &self,
-        task: &str,
-        params: std::collections::HashMap<String, String>,
-        priority: Priority,
-    ) -> Result<String, String> {
-        use std::time::Duration;
-        use std::env;
+pub fn submit(
+    &self,
+    task: &str,
+    params: std::collections::HashMap<String, String>,
+    priority: Priority,
+) -> Result<String, String> {
+    use std::time::Duration;
+    use std::env;
 
-        let is_cpu = Self::is_cpu_bound(task);
-        let queue_max = env::var("JOB_QUEUE_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100);
+    let is_cpu = Self::is_cpu_bound(task);
+    let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
+    let queue_type = if is_cpu { "CPU" } else { "IO" };
 
-        let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
-        let queue_type = if is_cpu { "CPU" } else { "IO" };
+    let timeout_secs = if is_cpu {
+        env::var("CPU_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60)
+    } else {
+        env::var("IO_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120)
+    };
 
-        let total_len = queue.total_len();
-        if total_len >= queue_max {
-            eprintln!(
-                "[JobManager] Rejected job for task '{}' — {} queue full ({} >= {})",
-                task, queue_type, total_len, queue_max
-            );
-            return Err(format!("QueueFull: {} pool is at capacity", queue_type));
-        }
+    let job = Arc::new(Job::with_priority(
+        task,
+        params,
+        priority,
+        Duration::from_secs(timeout_secs),
+    ));
+    let id = job.id.clone();
 
-        let timeout_secs = if is_cpu {
-            env::var("CPU_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60)
-        } else {
-            env::var("IO_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(120)
-        };
+    {
+        let mut map = self.jobs.lock().unwrap();
+        map.insert(id.clone(), job.clone());
+    }
 
-        let job = Arc::new(Job::with_priority(
-            task,
-            params,
-            priority,
-            Duration::from_secs(timeout_secs),
-        ));
-        let id = job.id.clone();
+    let queue_max = env::var("JOB_QUEUE_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100);
 
+    if let Err(_) = queue.try_enqueue(job.clone(), queue_max) {
         {
-            let mut map = self.jobs.lock().unwrap();
-            map.insert(id.clone(), job.clone());
+            let mut status = job.status.lock().unwrap();
+            *status = JobStatus::Error(format!(
+                "QueueFull: {} pool is at capacity (max={})",
+                queue_type, queue_max
+            ));
+            *job.finished_at.lock().unwrap() = Some(std::time::Instant::now());
+            *job.result.lock().unwrap() = Some(format!(
+                r#"{{"error":"queue_full","pool":"{}","max":{}}}"#,
+                queue_type, queue_max
+            ));
         }
 
         save_job_state(&job, &self.persist_path);
+        eprintln!(
+            "[JobManager] {} queue full — job {} marked as Error and not enqueued",
+            queue_type, id
+        );
 
-        if let Err(_) = queue.try_enqueue(job.clone()) {
-            eprintln!(
-                "[JobManager] enqueue failed: {} queue full while adding '{}'",
-                queue_type, task
-            );
-            self.jobs.lock().unwrap().remove(&id);
-            remove_job_state(&id, &self.persist_path);
-            return Err(format!("QueueFull: {} pool is at capacity", queue_type));
-        }
-
-        Ok(id)
+        return Ok(id);
     }
+
+    save_job_state(&job, &self.persist_path);
+    Ok(id)
+}
 
     fn is_cpu_bound(task: &str) -> bool {
         matches!(
