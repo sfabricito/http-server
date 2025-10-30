@@ -26,8 +26,9 @@ impl JobQueue {
         let (lock, cvar) = &**queue;
         let mut q = lock.lock().unwrap();
         q.push_back(job);
-        cvar.notify_one();
+        cvar.notify_all();
     }
+
 
     pub fn dequeue(&self) -> Arc<Job> {
         loop {

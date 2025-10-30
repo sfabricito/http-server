@@ -1,4 +1,9 @@
-use std::sync::{mpsc, Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{
+    mpsc, Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    OnceLock,
+};
 use std::thread;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -12,6 +17,19 @@ struct ThreadPoolInner {
     name: String,
     sender: mpsc::Sender<Message>,
     workers: Mutex<Vec<Option<thread::JoinHandle<()>>>>,
+    total_workers: usize,
+    active_workers: AtomicUsize,
+}
+
+static GLOBAL_POOLS: OnceLock<Mutex<HashMap<String, ThreadPool>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<String, ThreadPool>> {
+    GLOBAL_POOLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone)]
+pub struct ThreadPool {
+    inner: Arc<ThreadPoolInner>,
 }
 
 impl Drop for ThreadPoolInner {
@@ -28,12 +46,11 @@ impl Drop for ThreadPoolInner {
                 let _ = handle.join();
             }
         }
-    }
-}
 
-#[derive(Clone)]
-pub struct ThreadPool {
-    inner: Arc<ThreadPoolInner>,
+        if let Ok(mut reg) = registry().lock() {
+            reg.remove(&self.name);
+        }
+    }
 }
 
 impl ThreadPool {
@@ -45,8 +62,17 @@ impl ThreadPool {
 
         let mut workers = Vec::with_capacity(size);
 
+        let inner = Arc::new(ThreadPoolInner {
+            name: name.to_string(),
+            sender: tx,
+            workers: Mutex::new(Vec::new()),
+            total_workers: size,
+            active_workers: AtomicUsize::new(0),
+        });
+
         for idx in 0..size {
             let rx = Arc::clone(&receiver);
+            let inner_cloned = inner.clone();
             let thread_name = format!("{}-worker-{}", name, idx);
 
             let handle = thread::Builder::new()
@@ -59,7 +85,9 @@ impl ThreadPool {
 
                     match message {
                         Ok(Message::Run(job)) => {
+                            inner_cloned.active_workers.fetch_add(1, Ordering::SeqCst);
                             job();
+                            inner_cloned.active_workers.fetch_sub(1, Ordering::SeqCst);
                         }
                         Ok(Message::Shutdown) | Err(_) => {
                             break;
@@ -71,13 +99,19 @@ impl ThreadPool {
             workers.push(Some(handle));
         }
 
-        ThreadPool {
-            inner: Arc::new(ThreadPoolInner {
-                name: name.to_string(),
-                sender: tx,
-                workers: Mutex::new(workers),
-            }),
+        {
+            let mut guard = inner.workers.lock().unwrap();
+            *guard = workers;
         }
+
+        let pool = ThreadPool { inner };
+
+        {
+            let mut reg = registry().lock().unwrap();
+            reg.insert(pool.name().to_string(), pool.clone());
+        }
+
+        pool
     }
 
     pub fn from_env(name: &str, env_var: &str, default: usize) -> Self {
@@ -100,4 +134,42 @@ impl ThreadPool {
             );
         }
     }
+
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    pub fn total_workers(&self) -> usize {
+        self.inner.total_workers
+    }
+
+    pub fn active_workers(&self) -> usize {
+        self.inner.active_workers.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EndpointPoolMetrics {
+    pub total: usize,
+    pub active: usize,
+}
+
+pub fn all_endpoint_metrics() -> HashMap<String, EndpointPoolMetrics> {
+    let reg = registry().lock().unwrap();
+    let mut m = HashMap::new();
+    for (name, pool) in reg.iter() {
+        m.insert(
+            name.clone(),
+            EndpointPoolMetrics {
+                total: pool.total_workers(),
+                active: pool.active_workers(),
+            },
+        );
+    }
+    m
+}
+
+pub fn all_pools() -> Vec<(String, ThreadPool)> {
+    let reg = registry().lock().unwrap();
+    reg.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }

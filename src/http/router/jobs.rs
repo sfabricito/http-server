@@ -7,9 +7,11 @@ use crate::http::{
     response::{Response, OK, SERVICE_UNAVAILABLE},
     errors::ServerError,
     router::router::QueryParam,
+    
 };
 use crate::jobs::manager::{JobError, JobManager};
 use crate::jobs::job::{JobStatus, Priority};
+use crate::worker_pool;
 
 pub struct JobResultHandler {
     pub job_manager: Arc<JobManager>,
@@ -207,43 +209,91 @@ pub struct JobMetricsHandler {
     pub job_manager: Arc<JobManager>,
 }
 
+
 impl RequestHandlerStrategy for JobMetricsHandler {
     fn handle(&self, _req: &HttpRequest) -> Result<Response, ServerError> {
         let pools = self.job_manager.get_metrics();
-        
-        let mut pools_json = Vec::new();
-        
-        for (name, metrics) in pools {
-            let queue_lengths = metrics.queue_lengths;
-            let worker_metrics = metrics.worker_metrics;
-            let snapshot = worker_metrics.snapshot();
-            let active_workers = *worker_metrics.active_workers.lock().unwrap();
-            let avg_wait_ms = snapshot.avg_wait_ms.round() as u64;
-            let avg_exec_ms = snapshot.avg_exec_ms.round() as u64;
-            
-            pools_json.push(format!(
-                r#""{}":{{"queue_size":{{"high":{}, "normal":{}, "low":{}}},
-                   "workers":{{"active":{}, "total":{}}},
-                   "timings":{{"avg_wait_ms":{}, "avg_process_ms":{},
-                             "std_dev_wait_ms":{:.2}, "std_dev_process_ms":{:.2}}}}}"#,
-                name,
-                queue_lengths.0, queue_lengths.1, queue_lengths.2,
-                active_workers,
-                worker_metrics.total_workers,
-                avg_wait_ms,
-                avg_exec_ms,
-                snapshot.std_dev_wait_ms,
-                snapshot.std_dev_exec_ms
+        let endpoint_pools = worker_pool::all_endpoint_metrics();
+
+        let mut system_json = Vec::new(); 
+        let mut workers_json = Vec::new(); 
+
+        let mut total_workers = 0;
+        let mut busy_workers = 0;
+
+        let ordered_names = ["cpu", "io"];
+        for &name in &ordered_names {
+            if let Some(metrics) = pools.get(name) {
+                let queue = metrics.queue_lengths;
+                let wm = &metrics.worker_metrics;
+
+                let active = *wm.active_workers.lock().unwrap();
+                let total = wm.total_workers;
+                total_workers += total;
+                busy_workers += active;
+
+                let snapshot = wm.snapshot();
+                let avg_wait_ms = snapshot.avg_wait_ms.round() as u64;
+                let avg_exec_ms = snapshot.avg_exec_ms.round() as u64;
+                let avg_total_ms = (snapshot.avg_wait_ms + snapshot.avg_exec_ms).round() as u64;
+
+                system_json.push(format!(
+                    r#""{}":{{
+                        "queue_size": {{"high": {}, "normal": {}, "low": {}}},
+                        "workers": {{"active": {}, "total": {}}},
+                        "jobs": {{"samples": {}}}, 
+                        "timings": {{
+                            "avg_wait_ms": {},
+                            "avg_exec_ms": {},
+                            "avg_total_ms": {},
+                            "std_dev_wait_ms": {:.2},
+                            "std_dev_exec_ms": {:.2}
+                        }}
+                    }}"#,
+                    name,
+                    queue.0, queue.1, queue.2,
+                    active, total,
+                    snapshot.samples,
+                    avg_wait_ms, avg_exec_ms, avg_total_ms,
+                    snapshot.std_dev_wait_ms, snapshot.std_dev_exec_ms
+                ));
+            }
+        }
+
+        for (name, m) in endpoint_pools {
+            total_workers += m.total;
+            busy_workers += m.active;
+            workers_json.push(format!(
+                r#""{}":{{"active": {}, "total": {}}}"#,
+                name, m.active, m.total
             ));
         }
 
-        let json = format!("{{\"pools\":{{{}}}}}", pools_json.join(","));
+        let json = format!(
+            r#"{{
+                "workers": {{
+                    "total": {},
+                    "busy": {}
+                }},
+                "system_pools": {{
+                    {}
+                }},
+                "workers_detail": {{
+                    {}
+                }}
+            }}"#,
+            total_workers,
+            busy_workers,
+            system_json.join(","),
+            workers_json.join(",")
+        );
 
         Ok(Response::new(OK)
             .set_header("Content-Type", "application/json")
             .with_body(json))
     }
 }
+
 
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
     builder
