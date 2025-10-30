@@ -42,7 +42,6 @@ impl JobQueue {
                 return job;
             }
 
-            // wait until some queue gets work
             let (lock, cvar) = &*self.normal;
             let q = lock.lock().unwrap();
             let _unused = cvar.wait(q).unwrap();

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use crate::jobs::{
@@ -24,19 +24,11 @@ impl RunningStats {
     }
 
     fn mean(&self) -> f64 {
-        if self.count == 0 {
-            0.0
-        } else {
-            self.mean
-        }
+        if self.count == 0 { 0.0 } else { self.mean }
     }
 
     fn std_dev(&self) -> f64 {
-        if self.count < 2 {
-            0.0
-        } else {
-            (self.m2 / (self.count - 1) as f64).sqrt()
-        }
+        if self.count < 2 { 0.0 } else { (self.m2 / (self.count - 1) as f64).sqrt() }
     }
 }
 
@@ -93,8 +85,8 @@ pub fn spawn_workers(
     pool_size: usize,
     queue: Arc<JobQueue>,
     manager: Arc<JobManager>,
-) -> Arc<WorkerMetrics> {
-    let metrics = Arc::new(WorkerMetrics::new(pool_size));
+) -> Arc<super::worker::WorkerMetrics> {
+    let metrics = Arc::new(super::worker::WorkerMetrics::new(pool_size));
 
     for idx in 0..pool_size {
         let queue = queue.clone();
@@ -122,24 +114,38 @@ pub fn spawn_workers(
                 *job.status.lock().unwrap() = JobStatus::Running;
             }
 
-            let exec_start = Instant::now();
             let job_id = job.id.clone();
             let task_name = job.task.clone();
-            let result = std::panic::catch_unwind(|| {
-                manager.execute_job(job.clone());
+            let timeout = job.timeout;
+
+            let job_clone = job.clone();
+            let manager_clone = manager.clone();
+            let (tx, rx) = mpsc::channel();
+
+            let handle = thread::spawn(move || {
+                let _ = std::panic::catch_unwind(|| {
+                    manager_clone.execute_job(job_clone);
+                });
+                let _ = tx.send(());
             });
 
+            let exec_start = Instant::now();
+            let finished_in_time = rx.recv_timeout(timeout).is_ok();
             let exec_time = exec_start.elapsed();
+
             metrics.record_exec(exec_time);
 
-            match result {
-                Ok(_) => {
-                    *job.finished_at.lock().unwrap() = Some(Instant::now());
-                }
-                Err(_) => {
-                    *job.status.lock().unwrap() = JobStatus::Error("panic".into());
-                }
+            if finished_in_time {
+                *job.finished_at.lock().unwrap() = Some(Instant::now());
+            } else {
+                *job.status.lock().unwrap() = JobStatus::Timeout;
+                println!(
+                    "[{} worker {}] ❌ job {} (task {}) timed out after {:?}",
+                    tag, idx, job_id, task_name, timeout
+                );
             }
+
+            let _ = handle.join();
 
             {
                 let mut active = metrics.active_workers.lock().unwrap();
