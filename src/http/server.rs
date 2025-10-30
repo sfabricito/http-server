@@ -1,4 +1,3 @@
-
 use std::{
     collections::VecDeque,
     fs::File,
@@ -7,10 +6,12 @@ use std::{
     sync::{
         Arc,
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        RwLock,
+        atomic::{AtomicUsize, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    process,
 };
 
 use libc::{
@@ -31,25 +32,46 @@ use crate::{
     },
 };
 
-
-pub struct ServerConfig { pub bind_addr: String, pub max_connections: usize, pub rate_limit_per_sec: usize }
-impl Default for ServerConfig { fn default() -> Self { Self{ bind_addr: "127.0.0.1:8080".into(), max_connections: 64, rate_limit_per_sec: 200 } } }
+pub struct ServerConfig {
+    pub bind_addr: String,
+    pub max_connections: usize,
+    pub rate_limit_per_sec: usize,
+}
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: "127.0.0.1:8080".into(),
+            max_connections: 64,
+            rate_limit_per_sec: 200,
+        }
+    }
+}
 
 pub struct HttpServer {
     pub cfg: ServerConfig,
-    pub dispatcher: Arc<Dispatcher>,
+    dispatcher: Arc<RwLock<Arc<Dispatcher>>>,
     active: Arc<AtomicUsize>,
+    total_connections: Arc<AtomicUsize>,
+    start_time: Instant,
+    pid: u32,
     window: Arc<Mutex<VecDeque<Instant>>>,
 }
 
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 impl HttpServer {
-    pub fn new(cfg: ServerConfig) -> Self { Self::with_dispatcher(cfg, Dispatcher::new()) }
+    pub fn new(cfg: ServerConfig) -> Self {
+        Self::with_dispatcher(cfg, Dispatcher::new())
+    }
 
     pub fn with_dispatcher(cfg: ServerConfig, dispatcher: Dispatcher) -> Self {
         Self {
             cfg,
-            dispatcher: Arc::new(dispatcher),
+            dispatcher: Arc::new(RwLock::new(Arc::new(dispatcher))),
             active: Arc::new(AtomicUsize::new(0)),
+            total_connections: Arc::new(AtomicUsize::new(0)),
+            start_time: Instant::now(),
+            pid: process::id(),
             window: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -58,6 +80,8 @@ impl HttpServer {
         let (ip, port) = parse_ipv4_addr(&self.cfg.bind_addr)?;
         let listen_fd = create_listen_socket(ip, port)?;
         println!("🚀 Listening on {}", self.cfg.bind_addr);
+        println!("🆔 PID: {}", self.pid);
+        println!("⏱️  Uptime tracking started...");
 
         loop {
             let client_fd = match Self::accept_client(listen_fd) {
@@ -78,17 +102,40 @@ impl HttpServer {
                 continue;
             }
 
+            // ✅ Count this connection as attended
             self.active.fetch_add(1, Ordering::SeqCst);
-            let dispatcher = Arc::clone(&self.dispatcher);
+
+            let dispatcher = self.dispatcher();
             let active = Arc::clone(&self.active);
+            let total = Arc::clone(&self.total_connections);
 
             thread::spawn(move || {
                 if let Err(e) = Self::serve_client(client_fd, dispatcher) {
                     eprintln!("Error handling connection: {e}");
                 }
+                total.fetch_add(1, Ordering::SeqCst);
                 active.fetch_sub(1, Ordering::SeqCst);
             });
         }
+    }
+
+    pub fn uptime(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
+    }
+
+    pub fn stats_json(&self) -> String {
+        format!(
+            r#"{{
+                "pid": {},
+                "uptime_secs": {},
+                "active_connections": {},
+                "total_connections": {}
+            }}"#,
+            self.pid,
+            self.uptime(),
+            self.active.load(Ordering::SeqCst),
+            self.total_connections.load(Ordering::SeqCst)
+        )
     }
 
     fn accept_client(listen_fd: i32) -> io::Result<i32> {
@@ -118,7 +165,10 @@ impl HttpServer {
     fn reject_client(fd: i32, status: Status, message: &str) {
         unsafe {
             let mut stream = std::fs::File::from_raw_fd(fd);
-            let response = Response::new(status).with_body(message);
+            let request_id = next_request_id();
+            let response = Response::new(status)
+                .set_header("X-Request-Id", &request_id)
+                .with_body(message);
             let _ = stream.write_all(&response.to_bytes(false));
             let _ = stream.flush();
         }
@@ -143,14 +193,44 @@ impl HttpServer {
             false
         }
     }
+
+
+    pub fn get_pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn get_total_connections(&self) -> usize {
+        self.total_connections.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_dispatcher(&self, dispatcher: Dispatcher) {
+        let mut guard = self.dispatcher.write().expect("dispatcher lock poisoned");
+        *guard = Arc::new(dispatcher);
+    }
+
+    pub fn dispatcher(&self) -> Arc<Dispatcher> {
+        Arc::clone(&self.dispatcher.read().expect("dispatcher lock poisoned"))
+    }
 }
+
+
 
 fn handle_connection<RW: Read + Write>(
     rw: &mut RW,
     dispatcher: &Dispatcher
 ) -> Result<(), ServerError> {
     match HttpRequest::parse(rw) {
-        Ok(req) => {
+        Ok(mut req) => {
+            let request_id = req
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(next_request_id);
+
+            req.headers
+                .insert("X-Request-Id".to_string(), request_id.clone());
+
             let is_head = matches!(req.method, HttpMethod::HEAD);
 
             let resp = match dispatcher.dispatch(&req) {
@@ -172,6 +252,8 @@ fn handle_connection<RW: Read + Write>(
                 }
             };
 
+            let resp = resp.set_header("X-Request-Id", &request_id);
+
             let bytes = resp.to_bytes(is_head);
             let _ = rw.write_all(&bytes);
             let _ = rw.flush();
@@ -188,9 +270,11 @@ fn handle_connection<RW: Read + Write>(
                 ServerError::Internal(_) | ServerError::Io(_) => INTERNAL_SERVER_ERROR,
             };
 
+            let request_id = next_request_id();
             let json_body = format!("{{\"error\": \"{}\"}}", e.to_string());
             let resp = Response::new(status)
                 .set_header("Content-Type", "application/json")
+                .set_header("X-Request-Id", &request_id)
                 .with_body(json_body);
 
             let _ = rw.write_all(&resp.to_bytes(false));
@@ -200,13 +284,21 @@ fn handle_connection<RW: Read + Write>(
     }
 }
 
+fn next_request_id() -> String {
+    let seq = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    format!("{timestamp:x}-{seq:x}")
+}
+
 pub fn create_listen_socket(ip_host: u32, port_host: u16) -> io::Result<RawFd> {
     let fd = unsafe { libc::socket(AF_INET, SOCK_STREAM, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
 
-    // Allow immediate reuse of port
     let opt: c_int = 1;
     unsafe {
         libc::setsockopt(
@@ -220,8 +312,8 @@ pub fn create_listen_socket(ip_host: u32, port_host: u16) -> io::Result<RawFd> {
 
     let mut addr: sockaddr_in = unsafe { std::mem::zeroed() };
     addr.sin_family = AF_INET as u16;
-    addr.sin_port = port_host.to_be();     // convert port to network byte order
-    addr.sin_addr.s_addr = ip_host;        // use ip as-is (already parsed)
+    addr.sin_port = port_host.to_be();
+    addr.sin_addr.s_addr = ip_host;
 
     let rc = unsafe {
         libc::bind(
@@ -253,13 +345,15 @@ fn create_parse_error(msg: &str) -> io::Error {
 fn parse_ipv4_addr(addr: &str) -> io::Result<(u32, u16)> {
     let split = addr.trim();
 
-    let (host_str, port_str) = split.rsplit_once(':')
+    let (host_str, port_str) = split
+        .rsplit_once(':')
         .ok_or_else(|| create_parse_error("Address format must be 'HOST:PORT'"))?;
-    
+
     let host_str = host_str.trim();
     let port_str = port_str.trim();
 
-    let port: u16 = port_str.parse()
+    let port: u16 = port_str
+        .parse()
         .map_err(|_| create_parse_error(&format!("Invalid port value: '{}'", port_str)))?;
 
     let final_host_str = match host_str {
@@ -271,24 +365,31 @@ fn parse_ipv4_addr(addr: &str) -> io::Result<(u32, u16)> {
     };
 
     let mut octets: [u8; 4] = [0; 4];
-    
+
     for (i, part) in final_host_str.split('.').enumerate() {
-        if i >= 4 { 
-            return Err(create_parse_error(&format!("Invalid IPv4 format: '{}' has too many octets", final_host_str)));
+        if i >= 4 {
+            return Err(create_parse_error(&format!(
+                "Invalid IPv4 format: '{}' has too many octets",
+                final_host_str
+            )));
         }
 
-        let octet_val = part.parse::<u8>()
-            .map_err(|_| create_parse_error(&format!("Invalid octet value: '{}'", part)))?;
-        
+        let octet_val = part.parse::<u8>().map_err(|_| {
+            create_parse_error(&format!("Invalid octet value: '{}'", part))
+        })?;
+
         octets[i] = octet_val;
     }
 
     if final_host_str.split('.').count() != 4 {
-        return Err(create_parse_error(&format!("Invalid IPv4 format: '{}' must have 4 octets", final_host_str)));
+        return Err(create_parse_error(&format!(
+            "Invalid IPv4 format: '{}' must have 4 octets",
+            final_host_str
+        )));
     }
 
     let ip_host: u32 = u32::from_ne_bytes(octets);
     let port_host: u16 = port;
 
     Ok((ip_host, port_host))
-}   
+}

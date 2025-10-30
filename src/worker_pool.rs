@@ -1,10 +1,21 @@
 use std::collections::HashMap;
 use std::sync::{
     mpsc, Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
     OnceLock,
 };
 use std::thread;
+
+#[cfg(target_os = "linux")]
+fn gettid() -> i32 {
+    // SAFETY: direct syscall; returns thread id (TID) on Linux
+    unsafe { libc::syscall(libc::SYS_gettid) as i32 }
+}
+#[cfg(not(target_os = "linux"))]
+fn gettid() -> i32 {
+    // Fallback: use process id if no gettid (not unique per thread, but deterministic)
+    std::process::id() as i32
+}
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -13,10 +24,18 @@ enum Message {
     Shutdown,
 }
 
+#[derive(Default)]
+struct WorkerInfo {
+    tid: AtomicI32,      // OS thread id (TID on Linux, PID fallback elsewhere)
+    busy: AtomicBool,    // true when executing a job
+    name: String,        // thread name for debugging
+}
+
 struct ThreadPoolInner {
     name: String,
     sender: mpsc::Sender<Message>,
     workers: Mutex<Vec<Option<thread::JoinHandle<()>>>>,
+    infos: Vec<Arc<WorkerInfo>>, // one per worker
     total_workers: usize,
     active_workers: AtomicUsize,
 }
@@ -36,10 +55,12 @@ impl Drop for ThreadPoolInner {
     fn drop(&mut self) {
         let worker_len = self.workers.lock().unwrap().len();
 
+        // Tell everyone to shut down
         for _ in 0..worker_len {
             let _ = self.sender.send(Message::Shutdown);
         }
 
+        // Join them
         let mut workers = self.workers.lock().unwrap();
         for handle_opt in workers.iter_mut() {
             if let Some(handle) = handle_opt.take() {
@@ -47,6 +68,7 @@ impl Drop for ThreadPoolInner {
             }
         }
 
+        // Remove from registry
         if let Ok(mut reg) = registry().lock() {
             reg.remove(&self.name);
         }
@@ -61,11 +83,13 @@ impl ThreadPool {
         let receiver = Arc::new(Mutex::new(rx));
 
         let mut workers = Vec::with_capacity(size);
+        let mut infos = Vec::with_capacity(size);
 
         let inner = Arc::new(ThreadPoolInner {
             name: name.to_string(),
             sender: tx,
             workers: Mutex::new(Vec::new()),
+            infos: Vec::new(),
             total_workers: size,
             active_workers: AtomicUsize::new(0),
         });
@@ -75,22 +99,41 @@ impl ThreadPool {
             let inner_cloned = inner.clone();
             let thread_name = format!("{}-worker-{}", name, idx);
 
+            let info = Arc::new(WorkerInfo {
+                tid: AtomicI32::new(0),
+                busy: AtomicBool::new(false),
+                name: thread_name.clone(),
+            });
+            infos.push(info.clone());
+
             let handle = thread::Builder::new()
                 .name(thread_name.clone())
-                .spawn(move || loop {
-                    let message = {
-                        let guard = rx.lock().expect("worker receiver lock poisoned");
-                        guard.recv()
-                    };
+                .spawn(move || {
+                    // record OS thread id
+                    let tid = gettid();
+                    info.tid.store(tid, Ordering::SeqCst);
 
-                    match message {
-                        Ok(Message::Run(job)) => {
-                            inner_cloned.active_workers.fetch_add(1, Ordering::SeqCst);
-                            job();
-                            inner_cloned.active_workers.fetch_sub(1, Ordering::SeqCst);
-                        }
-                        Ok(Message::Shutdown) | Err(_) => {
-                            break;
+                    loop {
+                        let message = {
+                            let guard = rx.lock().expect("worker receiver lock poisoned");
+                            guard.recv()
+                        };
+
+                        match message {
+                            Ok(Message::Run(job)) => {
+                                info.busy.store(true, Ordering::SeqCst);
+                                inner_cloned.active_workers.fetch_add(1, Ordering::SeqCst);
+
+                                job();
+
+                                inner_cloned.active_workers.fetch_sub(1, Ordering::SeqCst);
+                                info.busy.store(false, Ordering::SeqCst);
+                            }
+                            Ok(Message::Shutdown) | Err(_) => {
+                                // best effort: mark idle on exit
+                                info.busy.store(false, Ordering::SeqCst);
+                                break;
+                            }
                         }
                     }
                 })
@@ -102,6 +145,13 @@ impl ThreadPool {
         {
             let mut guard = inner.workers.lock().unwrap();
             *guard = workers;
+        }
+        {
+            // store infos
+            let inner_mut = Arc::as_ptr(&inner) as *mut ThreadPoolInner;
+            unsafe {
+                (*inner_mut).infos = infos;
+            }
         }
 
         let pool = ThreadPool { inner };
@@ -146,12 +196,31 @@ impl ThreadPool {
     pub fn active_workers(&self) -> usize {
         self.inner.active_workers.load(Ordering::SeqCst)
     }
+
+    pub fn per_worker_snapshots(&self) -> Vec<WorkerSnapshot> {
+        self.inner
+            .infos
+            .iter()
+            .map(|info| WorkerSnapshot {
+                name: info.name.clone(),
+                pid: info.tid.load(Ordering::SeqCst),
+                state: if info.busy.load(Ordering::SeqCst) { "busy" } else { "idle" }.to_string(),
+            })
+            .collect()
+    }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EndpointPoolMetrics {
     pub total: usize,
     pub active: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkerSnapshot {
+    pub name: String,
+    pub pid: i32,
+    pub state: String,
 }
 
 pub fn all_endpoint_metrics() -> HashMap<String, EndpointPoolMetrics> {
@@ -165,6 +234,15 @@ pub fn all_endpoint_metrics() -> HashMap<String, EndpointPoolMetrics> {
                 active: pool.active_workers(),
             },
         );
+    }
+    m
+}
+
+pub fn all_endpoint_workers_detail() -> HashMap<String, Vec<WorkerSnapshot>> {
+    let reg = registry().lock().unwrap();
+    let mut m = HashMap::new();
+    for (name, pool) in reg.iter() {
+        m.insert(name.clone(), pool.per_worker_snapshots());
     }
     m
 }

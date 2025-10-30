@@ -1,11 +1,18 @@
+use std::any::Any;
 use std::sync::Arc;
 use std::collections::HashMap;
 use super::response::{Response, OK};
 use crate::http::errors::ServerError;
 use super::request::{HttpMethod, HttpRequest};
 
-pub trait RequestHandlerStrategy: Send + Sync + 'static {
+pub trait RequestHandlerStrategy: Any + Send + Sync + 'static {
     fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError>;
+}
+
+impl dyn RequestHandlerStrategy {
+    pub fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 pub struct GetHandler;
@@ -48,18 +55,66 @@ impl RequestHandlerStrategy for PostHandler {
 }
 
 pub struct Dispatcher {
-    get: Arc<dyn RequestHandlerStrategy>,
-    head: Arc<dyn RequestHandlerStrategy>,
-    post: Arc<dyn RequestHandlerStrategy>,
+    get_default: Arc<dyn RequestHandlerStrategy>,
+    head_default: Arc<dyn RequestHandlerStrategy>,
+    post_default: Arc<dyn RequestHandlerStrategy>,
+    get_routes: HashMap<String, Arc<dyn RequestHandlerStrategy>>,
+    head_routes: HashMap<String, Arc<dyn RequestHandlerStrategy>>,
+    post_routes: HashMap<String, Arc<dyn RequestHandlerStrategy>>,
 }
 
 impl Dispatcher {
     pub fn new() -> Self {
-        Self { get: Arc::new(GetHandler), head: Arc::new(HeadHandler), post: Arc::new(PostHandler) }
+        Self {
+            get_default: Arc::new(GetHandler),
+            head_default: Arc::new(HeadHandler),
+            post_default: Arc::new(PostHandler),
+            get_routes: HashMap::new(),
+            head_routes: HashMap::new(),
+            post_routes: HashMap::new(),
+        }
     }
     pub fn builder() -> DispatcherBuilder { DispatcherBuilder::default() }
     pub fn dispatch(&self, req: &HttpRequest) -> Result<Response, ServerError> {
-        match req.method { HttpMethod::GET=>self.get.handle(req), HttpMethod::HEAD=>self.head.handle(req), HttpMethod::POST=>self.post.handle(req), HttpMethod::Unsupported(ref m)=>Err(ServerError::BadRequest(format!("Unsupported method: {}", m))) }
+        match req.method {
+            HttpMethod::GET => {
+                if self.get_routes.is_empty() {
+                    self.get_default.handle(req)
+                } else if let Some(handler) = self.get_routes.get(&req.path) {
+                    handler.handle(req)
+                } else {
+                    Err(ServerError::NotFound)
+                }
+            }
+            HttpMethod::HEAD => {
+                if self.head_routes.is_empty() {
+                    self.head_default.handle(req)
+                } else if let Some(handler) = self.head_routes.get(&req.path) {
+                    handler.handle(req)
+                } else {
+                    Err(ServerError::NotFound)
+                }
+            }
+            HttpMethod::POST => {
+                if self.post_routes.is_empty() {
+                    self.post_default.handle(req)
+                } else if let Some(handler) = self.post_routes.get(&req.path) {
+                    handler.handle(req)
+                } else {
+                    Err(ServerError::NotFound)
+                }
+            }
+            HttpMethod::Unsupported(ref m) => {
+                Err(ServerError::BadRequest(format!("Unsupported method: {}", m)))
+            }
+        }
+    }
+
+    pub fn routes(&self) -> Vec<(String, Arc<dyn RequestHandlerStrategy>)> {
+        self.get_routes
+            .iter()
+            .map(|(path, handler)| (path.clone(), Arc::clone(handler)))
+            .collect()
     }
 }
 
@@ -77,30 +132,13 @@ impl DispatcherBuilder {
     pub fn post(mut self, path: &str, handler: Arc<dyn RequestHandlerStrategy>) -> Self { self.post_map.insert(path.to_string(), handler); self }
 
     pub fn build(self) -> Dispatcher {
-        // Build a dispatcher that first checks explicit maps; fallback to defaults
-        struct MapHandler { map: HashMap<String, Arc<dyn RequestHandlerStrategy>> }
-        impl RequestHandlerStrategy for MapHandler {
-            fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
-                if let Some(h) = self.map.get(&req.path) { h.handle(req) } else { Err(ServerError::NotFound) }
-            }
+        Dispatcher {
+            get_default: Arc::new(GetHandler),
+            head_default: Arc::new(HeadHandler),
+            post_default: Arc::new(PostHandler),
+            get_routes: self.get_map,
+            head_routes: self.head_map,
+            post_routes: self.post_map,
         }
-
-        let get: Arc<dyn RequestHandlerStrategy> = if self.get_map.is_empty() {
-            Arc::new(GetHandler)
-        } else {
-            Arc::new(MapHandler { map: self.get_map })
-        };
-        let head: Arc<dyn RequestHandlerStrategy> = if self.head_map.is_empty() {
-            Arc::new(HeadHandler)
-        } else {
-            Arc::new(MapHandler { map: self.head_map })
-        };
-        let post: Arc<dyn RequestHandlerStrategy> = if self.post_map.is_empty() {
-            Arc::new(PostHandler)
-        } else {
-            Arc::new(MapHandler { map: self.post_map })
-        };
-
-        Dispatcher { get, head, post }
     }
 }

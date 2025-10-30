@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
@@ -7,10 +6,13 @@ use crate::http::{
     response::{Response, OK},
     errors::ServerError,
     router::router::{PooledHandler, SimpleHandler, QueryParam},
+    server::HttpServer,
 };
+use crate::worker_pool::{self, ThreadPool};
 
 use crate::utils::{math, text, hash, file, time};
-use crate::worker_pool::ThreadPool;
+use crate::jobs::manager::JobManager; 
+
 
 // /fibonacci?num=N
 fn fibonacci_handler(req: &HttpRequest) -> Result<Response, ServerError> {
@@ -218,18 +220,87 @@ fn help_handler(_req: &HttpRequest) -> Result<Response, ServerError> {
 }
 
 // /status
-fn status_handler(_req: &HttpRequest) -> Result<Response, ServerError> {
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let json = format!(
-        "{{\"status\": \"running\", \"uptime\": {}, \"message\": \"Server running OK\"}}",
-        now
-    );
-    Ok(Response::new(OK)
-        .set_header("Content-Type", "application/json")
-        .with_body(json))
+pub struct ServerStatusHandler {
+    pub server: Arc<HttpServer>,
+    pub job_manager: Arc<JobManager>,
 }
 
-pub fn register(builder: DispatcherBuilder) -> DispatcherBuilder {
+impl RequestHandlerStrategy for ServerStatusHandler {
+    fn handle(&self, _req: &HttpRequest) -> Result<Response, ServerError> {
+        let pid = self.server.get_pid();
+        let uptime = self.server.uptime();
+        let attended = self.server.get_total_connections();
+
+        let mut pool_json = Vec::new();
+        let pools = self.job_manager.get_metrics();
+        for (name, data) in pools {
+            let q = data.queue_lengths;
+            let wm = &data.worker_metrics;
+            let active = *wm.active_workers.lock().unwrap();
+            let total = wm.total_workers;
+            pool_json.push(format!(
+                r#""{}": {{
+                    "queue": {{"high": {}, "normal": {}, "low": {}}},
+                    "workers": {{"active": {}, "total": {}}}
+                }}"#,
+                name, q.0, q.1, q.2, active, total
+            ));
+        }
+
+        let per_endpoint = worker_pool::all_endpoint_workers_detail();
+        let mut endpoint_workers_json = Vec::new();
+        for (name, workers) in per_endpoint {
+            let list: Vec<String> = workers
+                .into_iter()
+                .map(|w| format!(r#"{{"name":"{}","pid":{},"state":"{}"}}"#, w.name, w.pid, w.state))
+                .collect();
+            endpoint_workers_json.push(format!(r#""{}":[{}]"#, name, list.join(",")));
+        }
+
+        let mut command_json = Vec::new();
+        for (path, handler) in self.server.dispatcher().routes() {
+            if let Some(pooled) = handler.as_ref().as_any().downcast_ref::<PooledHandler>() {
+                let _pool = pooled.pool();
+                let queued = 0usize;
+                command_json.push(format!(
+                    r#""{}": {{"queue_size": {}, "pid": {}}}"#,
+                    path, queued, pid
+                ));
+            }
+        }
+
+        let json = format!(
+            r#"{{
+                "server": {{
+                    "pid": {},
+                    "uptime_secs": {},
+                    "attended_connections": {}
+                }},
+                "job_pools": {{
+                    {}
+                }},
+                "command_workers": {{
+                    {}
+                }}
+            }}"#,
+            pid,
+            uptime,
+            attended,
+            pool_json.join(","),
+            endpoint_workers_json.join(","),
+        );
+
+        Ok(Response::new(OK)
+            .set_header("Content-Type", "application/json")
+            .with_body(json))
+    }
+}
+
+pub fn register(
+    builder: DispatcherBuilder,
+    server: Arc<HttpServer>,
+    job_manager: Arc<JobManager>,
+) -> DispatcherBuilder {
     let make = |name: &'static str,
                 env_var: &'static str,
                 default: usize,
@@ -252,5 +323,11 @@ pub fn register(builder: DispatcherBuilder) -> DispatcherBuilder {
         .get("/random", make("random", "WORKERS_RANDOM", 2, random_handler))
         .get("/sleep", make("sleep", "WORKERS_SLEEP", 2, sleep_handler))
         .get("/help", make("help", "WORKERS_HELP", 1, help_handler))
-        .get("/status", make("status", "WORKERS_STATUS", 1, status_handler))
+        .get(
+            "/status",
+            Arc::new(ServerStatusHandler {
+                server: server.clone(),
+                job_manager: job_manager.clone(),
+            }),
+        )
 }

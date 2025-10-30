@@ -7,12 +7,10 @@ use crate::{
         handler::{RequestHandlerStrategy, Dispatcher},
         request::HttpRequest,
         response::Response,
-        router::{command, jobs, cpu_bound, io_bound}
+        router::{command, jobs, cpu_bound, io_bound},
+        server::HttpServer, 
     },
-    jobs::{
-        manager::JobManager,
-    },
-    
+    jobs::manager::JobManager,
 };
 
 use crate::worker_pool::ThreadPool;
@@ -40,6 +38,10 @@ impl PooledHandler {
     ) -> Self {
         Self { pool, handler }
     }
+
+    pub fn pool(&self) -> &ThreadPool {
+        &self.pool
+    }
 }
 
 impl RequestHandlerStrategy for PooledHandler {
@@ -62,18 +64,17 @@ impl RequestHandlerStrategy for PooledHandler {
 }
 
 
-pub fn build_routes(job_manager: Arc<JobManager>) -> Dispatcher {
+pub fn build_routes(server: Arc<HttpServer>, job_manager: Arc<JobManager>) -> Dispatcher {
     let mut builder = Dispatcher::builder();
 
-
     // Routes from other modules
-    builder = command::register(builder);
+    builder = command::register(builder, server.clone(), job_manager.clone());
     builder = jobs::register(builder, job_manager.clone());
     builder = cpu_bound::register(builder, job_manager.clone());
     builder = io_bound::register(builder, job_manager.clone());
+
     builder.build()
 }
-
 
 pub trait QueryParam {
     fn query_param(&self, key: &str) -> Option<&str>;
