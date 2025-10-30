@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
     request::HttpRequest,
-    response::{Response, OK},
+    response::{Response, OK, SERVICE_UNAVAILABLE},
     errors::ServerError,
     router::router::QueryParam,
 };
-use crate::jobs::manager::JobManager;
+use crate::jobs::manager::{JobError, JobManager};
 use crate::jobs::job::{JobStatus, Priority};
 
 pub struct JobResultHandler {
@@ -119,6 +119,14 @@ pub struct JobSubmitHandler {
     pub job_manager: Arc<JobManager>,
 }
 
+fn queue_full_response(retry_after_ms: u64) -> Response {
+    let retry_after_secs = ((retry_after_ms + 999) / 1000).max(1);
+    Response::new(SERVICE_UNAVAILABLE)
+        .set_header("Content-Type", "application/json")
+        .set_header("Retry-After", &retry_after_secs.to_string())
+        .with_body(format!("{{\"retry_after_ms\":{}}}", retry_after_ms))
+}
+
 impl RequestHandlerStrategy for JobSubmitHandler {
     fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
         let task = req.query_param("task")
@@ -144,9 +152,15 @@ impl RequestHandlerStrategy for JobSubmitHandler {
             }
         }
 
-        let job_id = self.job_manager
-            .submit(task, params, priority)
-            .map_err(|e| ServerError::Internal(format!("Failed to submit job: {}", e)))?;
+        let job_id = match self.job_manager.submit(task, params, priority) {
+            Ok(id) => id,
+            Err(JobError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(JobError::Unknown(err)) => {
+                return Err(ServerError::Internal(format!("Failed to submit job: {}", err)));
+            }
+        };
 
         let json = format!(
             "{{\"job_id\":\"{}\",\"status\":\"queued\",\"priority\":\"{}\"}}",
@@ -202,6 +216,10 @@ impl RequestHandlerStrategy for JobMetricsHandler {
         for (name, metrics) in pools {
             let queue_lengths = metrics.queue_lengths;
             let worker_metrics = metrics.worker_metrics;
+            let snapshot = worker_metrics.snapshot();
+            let active_workers = *worker_metrics.active_workers.lock().unwrap();
+            let avg_wait_ms = snapshot.avg_wait_ms.round() as u64;
+            let avg_exec_ms = snapshot.avg_exec_ms.round() as u64;
             
             pools_json.push(format!(
                 r#""{}":{{"queue_size":{{"high":{}, "normal":{}, "low":{}}},
@@ -210,12 +228,12 @@ impl RequestHandlerStrategy for JobMetricsHandler {
                              "std_dev_wait_ms":{:.2}, "std_dev_process_ms":{:.2}}}}}"#,
                 name,
                 queue_lengths.0, queue_lengths.1, queue_lengths.2,
-                worker_metrics.active_workers.lock().unwrap(),
+                active_workers,
                 worker_metrics.total_workers,
-                worker_metrics.avg_wait.lock().unwrap().as_millis(),
-                worker_metrics.avg_exec.lock().unwrap().as_millis(),
-                0.0, // TODO std dev not yet implemented
-                0.0  // TODO std dev not yet implemented
+                avg_wait_ms,
+                avg_exec_ms,
+                snapshot.std_dev_wait_ms,
+                snapshot.std_dev_exec_ms
             ));
         }
 

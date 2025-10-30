@@ -9,6 +9,7 @@ pub struct Status {
 }
 
 pub const OK: Status = Status { code: 200, reason: "OK" };
+pub const ACCEPTED: Status = Status { code: 202, reason: "Accepted" };
 pub const BAD_REQUEST: Status = Status { code: 400, reason: "Bad Request" };
 pub const NOT_FOUND: Status = Status { code: 404, reason: "Not Found" };
 pub const CONFLICT: Status = Status { code: 409, reason: "Conflict" };

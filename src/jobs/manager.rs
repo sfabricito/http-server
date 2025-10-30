@@ -5,15 +5,15 @@ use crate::jobs::{
     workers::{cpu_pool::CpuPool, io_pool::IoPool, worker::WorkerMetrics},
 };
 
-use crate::utils::{
-    io::{
-        sort_file::sort_file,
-    }
-};
-
 pub struct PoolMetrics {
     pub queue_lengths: (usize, usize, usize),
     pub worker_metrics: Arc<WorkerMetrics>,
+}
+
+#[derive(Debug)]
+pub enum JobError {
+    QueueFull { retry_after_ms: u64 },
+    Unknown(String),
 }
 
 pub struct JobManager {
@@ -32,7 +32,7 @@ impl JobManager {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/persistent/state.jsonl"));
             
-        let manager = Arc::new_cyclic(|weak_self| JobManager {
+        let manager = Arc::new_cyclic(|_weak_self| JobManager {
             cpu_pool: Arc::new(CpuPool::empty()),
             io_pool: Arc::new(IoPool::empty()),
             jobs: jobs.clone(),
@@ -59,7 +59,7 @@ impl JobManager {
         task: &str,
         params: std::collections::HashMap<String, String>,
         priority: Priority,
-    ) -> Result<String, String> {
+    ) -> Result<String, JobError> {
         use std::time::Duration;
         use std::env;
 
@@ -71,7 +71,11 @@ impl JobManager {
 
         let queue = if is_cpu { &self.cpu_pool.queue } else { &self.io_pool.queue };
         if queue.total_len() >= queue_max {
-            return Err("QueueFull".into());
+            let retry_after_ms = env::var("JOB_RETRY_AFTER_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1_000);
+            return Err(JobError::QueueFull { retry_after_ms });
         }
 
         let timeout_secs = if is_cpu {
@@ -106,6 +110,71 @@ impl JobManager {
         Ok(id)
     }
 
+    pub fn register_inflight(
+        &self,
+        task: &str,
+        params: std::collections::HashMap<String, String>,
+        priority: Priority,
+    ) -> Result<Arc<Job>, JobError> {
+        let timeout_secs = if Self::is_cpu_bound(task) {
+            env::var("CPU_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60)
+        } else {
+            env::var("IO_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(120)
+        };
+
+        let job = Arc::new(Job::with_priority(
+            task,
+            params,
+            priority,
+            Duration::from_secs(timeout_secs),
+        ));
+
+        {
+            *job.status.lock().unwrap() = JobStatus::Running;
+            *job.started_at.lock().unwrap() = Some(Instant::now());
+        }
+
+        {
+            let mut map = self.jobs.lock().unwrap();
+            map.insert(job.id.clone(), job.clone());
+        }
+
+        save_job_state(&job, &self.persist_path);
+
+        Ok(job)
+    }
+
+    pub fn mark_job_done(&self, job_id: &str, outcome: Result<String, String>) {
+        let job_opt = {
+            let map = self.jobs.lock().unwrap();
+            map.get(job_id).cloned()
+        };
+
+        if let Some(job) = job_opt {
+            {
+                *job.finished_at.lock().unwrap() = Some(Instant::now());
+                match outcome {
+                    Ok(ref json) => {
+                        *job.result.lock().unwrap() = Some(json.clone());
+                        *job.status.lock().unwrap() = JobStatus::Done;
+                    }
+                    Err(ref err) => {
+                        *job.result.lock().unwrap() = None;
+                        *job.status.lock().unwrap() = JobStatus::Error(err.clone());
+                    }
+                }
+            }
+
+            save_job_state(&job, &self.persist_path);
+        }
+    }
+
     fn is_cpu_bound(task: &str) -> bool {
         matches!(
             task,
@@ -118,14 +187,6 @@ impl JobManager {
                 | "reverse"
                 | "toupper"
                 | "random"
-        )
-    }
-
-    fn is_io_bound(task: &str) -> bool {
-        matches!(
-            task,
-            "sortfile" | "wordcount" | "grep" | "compress"| 
-            "hashfile" | "createfile" | "deletefile" | "timestamp"
         )
     }
 

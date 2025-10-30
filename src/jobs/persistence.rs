@@ -1,17 +1,27 @@
-use std::{fs::{self, OpenOptions}, io::{BufRead, BufReader, Write}, path::Path, time::Instant};
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    sync::Mutex,
+};
 use crate::jobs::job::{Job, JobStatus, Priority};
 use serde_json::{json, Value, Map};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref FILE_LOCK: Mutex<()> = Mutex::new(());
+}
 
 pub fn save_job_state(job: &Job, path: &Path) {
+    let _guard = FILE_LOCK.lock().unwrap();
+
     let snapshot = json!({
         "id": job.id,
         "task": job.task,
         "priority": format!("{:?}", job.priority),
         "status": format!("{:?}", *job.status.lock().unwrap()),
         "progress": *job.progress.lock().unwrap(),
-
         "result": job.result.lock().unwrap().clone().unwrap_or_default(),
-
         "params": job.params,
         "created_at_ms": job.created_at.elapsed().as_millis(),
         "started_at": job.started_at.lock().unwrap().map(|t| t.elapsed().as_millis()),
@@ -65,7 +75,9 @@ pub struct SavedJob {
 }
 
 pub fn load_job_states(path: &Path) -> Vec<SavedJob> {
+    let _guard = FILE_LOCK.lock().unwrap();
     let mut restored = Vec::new();
+
     if !path.exists() {
         return restored;
     }
@@ -96,8 +108,8 @@ pub fn load_job_states(path: &Path) -> Vec<SavedJob> {
                     };
 
                     let result = val.get("result")
-                    .and_then(|r| r.as_str())
-                    .map(|s| s.to_string());
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string());
 
                     restored.push(SavedJob {
                         id,

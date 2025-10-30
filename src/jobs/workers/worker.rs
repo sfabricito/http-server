@@ -2,16 +2,57 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use crate::jobs::{
-    job::{Job, JobStatus},
+    job::JobStatus,
     manager::JobManager,
     queue::JobQueue,
 };
 
+#[derive(Default, Clone, Copy)]
+struct RunningStats {
+    count: u64,
+    mean: f64,
+    m2: f64,
+}
+
+impl RunningStats {
+    fn update(&mut self, sample: f64) {
+        self.count += 1;
+        let delta = sample - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = sample - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn mean(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.mean
+        }
+    }
+
+    fn std_dev(&self) -> f64 {
+        if self.count < 2 {
+            0.0
+        } else {
+            (self.m2 / (self.count - 1) as f64).sqrt()
+        }
+    }
+}
+
+pub struct MetricsSnapshot {
+    pub avg_wait_ms: f64,
+    pub avg_exec_ms: f64,
+    pub std_dev_wait_ms: f64,
+    pub std_dev_exec_ms: f64,
+    pub samples: u64,
+}
+
 pub struct WorkerMetrics {
     pub active_workers: Arc<Mutex<usize>>,
     pub total_workers: usize,
-    pub avg_wait: Arc<Mutex<Duration>>,
-    pub avg_exec: Arc<Mutex<Duration>>,
+    wait_stats: Arc<Mutex<RunningStats>>,
+    exec_stats: Arc<Mutex<RunningStats>>,
 }
 
 impl WorkerMetrics {
@@ -19,8 +60,30 @@ impl WorkerMetrics {
         Self {
             active_workers: Arc::new(Mutex::new(0)),
             total_workers: total,
-            avg_wait: Arc::new(Mutex::new(Duration::ZERO)),
-            avg_exec: Arc::new(Mutex::new(Duration::ZERO)),
+            wait_stats: Arc::new(Mutex::new(RunningStats::default())),
+            exec_stats: Arc::new(Mutex::new(RunningStats::default())),
+        }
+    }
+
+    pub fn record_wait(&self, duration: Duration) {
+        let mut stats = self.wait_stats.lock().unwrap();
+        stats.update(duration.as_secs_f64() * 1000.0);
+    }
+
+    pub fn record_exec(&self, duration: Duration) {
+        let mut stats = self.exec_stats.lock().unwrap();
+        stats.update(duration.as_secs_f64() * 1000.0);
+    }
+
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        let wait = *self.wait_stats.lock().unwrap();
+        let exec = *self.exec_stats.lock().unwrap();
+        MetricsSnapshot {
+            avg_wait_ms: wait.mean(),
+            avg_exec_ms: exec.mean(),
+            std_dev_wait_ms: wait.std_dev(),
+            std_dev_exec_ms: exec.std_dev(),
+            samples: wait.count,
         }
     }
 }
@@ -52,10 +115,7 @@ pub fn spawn_workers(
             }
 
             let start_wait = job.created_at.elapsed();
-            {
-                let mut avg_wait = metrics.avg_wait.lock().unwrap();
-                *avg_wait = (*avg_wait + start_wait) / 2;
-            }
+            metrics.record_wait(start_wait);
 
             {
                 *job.started_at.lock().unwrap() = Some(Instant::now());
@@ -70,11 +130,7 @@ pub fn spawn_workers(
             });
 
             let exec_time = exec_start.elapsed();
-
-            {
-                let mut avg_exec = metrics.avg_exec.lock().unwrap();
-                *avg_exec = (*avg_exec + exec_time) / 2;
-            }
+            metrics.record_exec(exec_time);
 
             match result {
                 Ok(_) => {

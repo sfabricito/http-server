@@ -6,10 +6,11 @@ use crate::http::{
     request::HttpRequest,
     response::{Response, OK},
     errors::ServerError,
-    router::router::{SimpleHandler, QueryParam},
+    router::router::{PooledHandler, SimpleHandler, QueryParam},
 };
 
 use crate::utils::{math, text, hash, file, time};
+use crate::worker_pool::ThreadPool;
 
 // /fibonacci?num=N
 fn fibonacci_handler(req: &HttpRequest) -> Result<Response, ServerError> {
@@ -229,17 +230,27 @@ fn status_handler(_req: &HttpRequest) -> Result<Response, ServerError> {
 }
 
 pub fn register(builder: DispatcherBuilder) -> DispatcherBuilder {
+    let make = |name: &'static str,
+                env_var: &'static str,
+                default: usize,
+                handler_fn: fn(&HttpRequest) -> Result<Response, ServerError>|
+     -> Arc<dyn RequestHandlerStrategy> {
+        let inner: Arc<dyn RequestHandlerStrategy> = Arc::new(SimpleHandler(handler_fn));
+        let pooled = PooledHandler::new(ThreadPool::from_env(name, env_var, default), inner);
+        Arc::new(pooled)
+    };
+
     builder
-        .get("/fibonacci", Arc::new(SimpleHandler(fibonacci_handler)))
-        .get("/toupper", Arc::new(SimpleHandler(toupper_handler)))
-        .get("/reverse", Arc::new(SimpleHandler(reverse_handler)))
-        .get("/hash", Arc::new(SimpleHandler(hash_handler)))
-        .get("/timestamp", Arc::new(SimpleHandler(timestamp_handler)))
-        .get("/simulate", Arc::new(SimpleHandler(simulate_handler)))
-        .get("/createfile", Arc::new(SimpleHandler(createfile_handler)))
-        .get("/deletefile", Arc::new(SimpleHandler(deletefile_handler)))
-        .get("/random", Arc::new(SimpleHandler(random_handler)))
-        .get("/sleep", Arc::new(SimpleHandler(sleep_handler)))
-        .get("/help", Arc::new(SimpleHandler(help_handler)))
-        .get("/status", Arc::new(SimpleHandler(status_handler)))
+        .get("/fibonacci", make("fibonacci", "WORKERS_FIBONACCI", 2, fibonacci_handler))
+        .get("/toupper", make("toupper", "WORKERS_TOUPPER", 2, toupper_handler))
+        .get("/reverse", make("reverse", "WORKERS_REVERSE", 2, reverse_handler))
+        .get("/hash", make("hash", "WORKERS_HASH", 2, hash_handler))
+        .get("/timestamp", make("timestamp", "WORKERS_TIMESTAMP", 1, timestamp_handler))
+        .get("/simulate", make("simulate", "WORKERS_SIMULATE", 2, simulate_handler))
+        .get("/createfile", make("createfile", "WORKERS_CREATEFILE", 2, createfile_handler))
+        .get("/deletefile", make("deletefile", "WORKERS_DELETEFILE", 2, deletefile_handler))
+        .get("/random", make("random", "WORKERS_RANDOM", 2, random_handler))
+        .get("/sleep", make("sleep", "WORKERS_SLEEP", 2, sleep_handler))
+        .get("/help", make("help", "WORKERS_HELP", 1, help_handler))
+        .get("/status", make("status", "WORKERS_STATUS", 1, status_handler))
 }

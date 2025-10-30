@@ -1,12 +1,10 @@
-use num_bigint::{BigInt, ToBigInt};
+use num_bigint::BigInt;
 use num_traits::{One, Zero};
-use std::ops::{Div, Mul};
 
 /// Compute π using the Chudnovsky algorithm with arbitrary precision (BigInt only).
 pub fn pi_number(digits: usize) -> String {
     let extra_digits = 2;
     let scale = BigInt::from(10u64).pow((digits + extra_digits) as u32);
-    let one = BigInt::one();
     let mut sum = BigInt::zero();
 
     // constants as BigInt to prevent overflow
@@ -19,8 +17,6 @@ pub fn pi_number(digits: usize) -> String {
     let n_terms = (digits as f64 / 14.0).ceil() as usize + 1;
 
     for k in 0..n_terms {
-        let k_big = BigInt::from(k as u64);
-
         let num = factorial(6 * k)
             * BigInt::from(13591409u64 + 545140134u64 * k as u64);
         let den = factorial(3 * k)

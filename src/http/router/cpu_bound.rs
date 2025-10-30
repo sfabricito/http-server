@@ -1,34 +1,43 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
-    router::router::{SimpleHandler, QueryParam},
+    router::router::{PooledHandler, QueryParam},
     request::HttpRequest,
-    response::{Response, OK},
+    response::{Response, OK, ACCEPTED, SERVICE_UNAVAILABLE},
     errors::ServerError,
 };
 
 use crate::jobs::{
+    best_effort::{self, BestEffortError, BestEffortOutcome},
     job::Priority,
     manager::JobManager,
 };
+use crate::worker_pool::ThreadPool;
 
 use crate::utils::{
     cpu::{
         is_prime::{self, PrimeMethod},
         factor::factorize,
         matrixmul::matrixmul,
-        pi::pi_number,
         mandelbrot::mandelbrot
     },
-    timeout::run_with_timeout   
 };
 
 /// /isprime?n=NUM
 pub struct IsPrimeHandler {
     pub job_manager: Arc<JobManager>,
+}
+
+fn queue_full_response(retry_after_ms: u64) -> Response {
+    let retry_after_secs = ((retry_after_ms + 999) / 1000).max(1);
+    Response::new(SERVICE_UNAVAILABLE)
+        .set_header("Content-Type", "application/json")
+        .set_header("Retry-After", &retry_after_secs.to_string())
+        .with_body(format!("{{\"retry_after_ms\":{}}}", retry_after_ms))
 }
 
 impl RequestHandlerStrategy for IsPrimeHandler {
@@ -44,37 +53,65 @@ impl RequestHandlerStrategy for IsPrimeHandler {
             "TRIAL" | "SQRT" => PrimeMethod::Trial,
             _ => PrimeMethod::MillerRabin,
         };
-        let method_name = match method { PrimeMethod::Trial => "trial", _ => "miller-rabin" };
+        let method_name = match method {
+            PrimeMethod::Trial => "trial",
+            _ => "miller-rabin",
+        }
+        .to_string();
 
         let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500);
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(500);
 
-        // Try immediate execution
-        if let Some((result, elapsed)) = run_with_timeout(timeout_ms, move || is_prime::is_prime(n, method)) {
-            let json = format!(
-                "{{\"n\": {}, \"is_prime\": {}, \"method\": \"{}\", \"elapsed_ms\": {}}}",
-                n, result, method_name, elapsed
-            );
-            return Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json));
-        }
-
-        // Otherwise enqueue as job
         let mut params = HashMap::new();
         params.insert("n".into(), n.to_string());
-        params.insert("method".into(), method_name.to_string());
+        params.insert("method".into(), method_name.clone());
 
-        let job_id = self.job_manager.submit("isprime", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            n, timeout_ms, job_id
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "isprime",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let start = Instant::now();
+                let result = is_prime::is_prime(n, method);
+                let elapsed = start.elapsed().as_millis();
+                Ok(format!(
+                    "{{\"n\": {}, \"is_prime\": {}, \"method\": \"{}\", \"elapsed_ms\": {}}}",
+                    n, result, method_name, elapsed
+                ))
+            },
         );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     }
 }
 
@@ -93,36 +130,62 @@ impl RequestHandlerStrategy for FactorHandler {
             .map_err(|_| ServerError::BadRequest(format!("Invalid integer: {}", n_str)))?;
 
         let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500);
-
-        if let Some((factors, elapsed)) = run_with_timeout(timeout_ms, move || factorize(n)) {
-            let factors_json = factors
-                .iter()
-                .map(|(p, c)| format!("[{},{}]", p, c))
-                .collect::<Vec<_>>()
-                .join(",");
-
-            let json = format!(
-                "{{\"n\": {}, \"factors\": [{}], \"elapsed_ms\": {}}}",
-                n, factors_json, elapsed
-            );
-            return Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json));
-        }
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(500);
 
         let mut params = HashMap::new();
         params.insert("n".into(), n.to_string());
-        let job_id = self.job_manager.submit("factor", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
 
-        let json = format!(
-            "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            n, timeout_ms, job_id
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "factor",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let start = Instant::now();
+                let factors = factorize(n);
+                let elapsed = start.elapsed().as_millis();
+                let factors_json = factors
+                    .iter()
+                    .map(|(p, c)| format!("[{},{}]", p, c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Ok(format!(
+                    "{{\"n\": {}, \"factors\": [{}], \"elapsed_ms\": {}}}",
+                    n, factors_json, elapsed
+                ))
+            },
         );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"n\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    n, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     }
 }
 
@@ -152,35 +215,55 @@ impl RequestHandlerStrategy for PiHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(5000);
 
-        // Try direct computation (best effort)
-        if let Some((result, elapsed)) = run_with_timeout(timeout_ms, move || pi_number(digits)) {
-            let json = format!(
-                "{{\"digits\": {}, \"pi\": \"{}\", \"elapsed_ms\": {}}}",
-                digits, result, elapsed
-            );
-
-            return Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json));
-        }
-
-        // Fallback: submit as async job
         let mut params = HashMap::new();
         params.insert("digits".into(), digits.to_string());
         params.insert("algo".into(), "chudnovsky".into());
 
-        let job_id = self.job_manager
-            .submit("pi", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            digits, timeout_ms, job_id
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "pi",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let start = Instant::now();
+                let result = pi_number(digits);
+                let elapsed = start.elapsed().as_millis();
+                Ok(format!(
+                    "{{\"digits\": {}, \"pi\": \"{}\", \"elapsed_ms\": {}}}",
+                    digits, result, elapsed
+                ))
+            },
         );
 
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"digits\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    digits, timeout_ms, job_id
+                );
+
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     }
 }
 
@@ -209,32 +292,55 @@ impl RequestHandlerStrategy for MatrixMulHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(5000);
 
-        if let Some(((hash, elapsed_calc), total_elapsed)) = run_with_timeout(timeout_ms, move || matrixmul(size, seed)) {
-            let json = format!(
-                "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
-                size, seed, hash, elapsed_calc, total_elapsed
-            );
-            return Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json));
-        }
-
         let mut params = HashMap::new();
         params.insert("size".into(), size.to_string());
         params.insert("seed".into(), seed.to_string());
 
-        let job_id = self.job_manager
-            .submit("matrixmul", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-        let json = format!(
-            "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            size, seed, timeout_ms, job_id
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "matrixmul",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let total_start = Instant::now();
+                let (hash, elapsed_calc) = matrixmul(size, seed);
+                let total_elapsed = total_start.elapsed().as_millis();
+                Ok(format!(
+                    "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
+                    size, seed, hash, elapsed_calc, total_elapsed
+                ))
+            },
         );
 
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"size\": {}, \"seed\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    size, seed, timeout_ms, job_id
+                );
+
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     }
 }
 
@@ -264,48 +370,111 @@ impl RequestHandlerStrategy for MandelbrotHandler {
         }
 
         let timeout_ms = env::var("BEST_EFFORT_TIMEOUT")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500);
-
-        if let Some(result) = run_with_timeout(timeout_ms, move || mandelbrot(width, height, max_iter, None)) {
-            let ((map, mandelbrot_elapsed), _) = result;
-
-            let rows_json = map.iter()
-                .map(|row| format!("[{}]", row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")))
-                .collect::<Vec<_>>()
-                .join(",");
-
-            let json = format!(
-                "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"elapsed_ms\": {}, \"map\": [{}]}}",
-                width, height, max_iter, mandelbrot_elapsed, rows_json
-            );
-            return Ok(Response::new(OK)
-                .set_header("Content-Type", "application/json")
-                .with_body(json));
-        }
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(500);
 
         let mut params = HashMap::new();
         params.insert("width".into(), width.to_string());
         params.insert("height".into(), height.to_string());
         params.insert("max_iter".into(), max_iter.to_string());
 
-        let job_id = self.job_manager.submit("mandelbrot", params, Priority::Normal)
-            .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "mandelbrot",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let (map, mandelbrot_elapsed) = mandelbrot(width, height, max_iter, None);
+                let rows_json = map
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            "[{}]",
+                            row.iter()
+                                .map(|v| v.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
 
-        let json = format!(
-            "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
-            width, height, max_iter, timeout_ms, job_id
+                Ok(format!(
+                    "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"elapsed_ms\": {}, \"map\": [{}]}}",
+                    width, height, max_iter, mandelbrot_elapsed, rows_json
+                ))
+            },
         );
-        Ok(Response::new(OK)
-            .set_header("Content-Type", "application/json")
-            .with_body(json))
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
+                .set_header("Content-Type", "application/json")
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"width\": {}, \"height\": {}, \"max_iter\": {}, \"status\": \"queued\", \"timeout_ms\": {}, \"job_id\": \"{}\"}}",
+                    width, height, max_iter, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
+        }
     }
 }
 
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
+    let isprime_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(IsPrimeHandler { job_manager: job_manager.clone() });
+    let factor_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(FactorHandler { job_manager: job_manager.clone() });
+    let pi_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(PiHandler { job_manager: job_manager.clone() });
+    let matrix_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(MatrixMulHandler { job_manager: job_manager.clone() });
+    let mandelbrot_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(MandelbrotHandler { job_manager: job_manager.clone() });
+
+    let isprime = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("isprime", "WORKERS_ISPRIME", 1),
+        isprime_handler,
+    ));
+    let factor = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("factor", "WORKERS_FACTOR", 4),
+        factor_handler,
+    ));
+    let pi = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("pi", "WORKERS_PI", 2),
+        pi_handler,
+    ));
+    let matrix = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("matrixmul", "WORKERS_MATRIXMUL", 2),
+        matrix_handler,
+    ));
+    let mandelbrot = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("mandelbrot", "WORKERS_MANDELBROT", 2),
+        mandelbrot_handler,
+    ));
+
     builder
-        .get("/isprime", Arc::new(IsPrimeHandler { job_manager: job_manager.clone() }))
-        .get("/factor", Arc::new(FactorHandler { job_manager: job_manager.clone() }))
-        .get("/pi", Arc::new(PiHandler { job_manager: job_manager.clone() })) // 👈 Added here
-        .get("/matrixmul", Arc::new(MatrixMulHandler { job_manager: job_manager.clone() }))
-        .get("/mandelbrot", Arc::new(MandelbrotHandler { job_manager: job_manager.clone() }))
+        .get("/isprime", isprime)
+        .get("/factor", factor)
+        .get("/pi", pi)
+        .get("/matrixmul", matrix)
+        .get("/mandelbrot", mandelbrot)
 }

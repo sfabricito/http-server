@@ -1,13 +1,12 @@
-use std::env;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::mpsc;
 
 use crate::{
     http::{
         errors::ServerError,
         handler::{RequestHandlerStrategy, Dispatcher},
         request::HttpRequest,
-        response::{Response, OK},
+        response::Response,
         router::{command, jobs, cpu_bound, io_bound}
     },
     jobs::{
@@ -15,6 +14,8 @@ use crate::{
     },
     
 };
+
+use crate::worker_pool::ThreadPool;
 
 pub struct SimpleHandler<F>(pub F);
 
@@ -24,6 +25,39 @@ where
 {
     fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
         (self.0)(req)
+    }
+}
+
+pub struct PooledHandler {
+    pool: ThreadPool,
+    handler: Arc<dyn RequestHandlerStrategy>,
+}
+
+impl PooledHandler {
+    pub fn new(
+        pool: ThreadPool,
+        handler: Arc<dyn RequestHandlerStrategy>,
+    ) -> Self {
+        Self { pool, handler }
+    }
+}
+
+impl RequestHandlerStrategy for PooledHandler {
+    fn handle(&self, req: &HttpRequest) -> Result<Response, ServerError> {
+        let (tx, rx) = mpsc::channel();
+        let handler = self.handler.clone();
+        let request = req.clone();
+
+        self.pool.execute(move || {
+            let outcome = handler.handle(&request);
+            let _ = tx.send(outcome);
+        });
+
+        rx.recv().unwrap_or_else(|_| {
+            Err(ServerError::Internal(
+                "Worker pool dropped the response channel".into(),
+            ))
+        })
     }
 }
 

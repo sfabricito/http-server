@@ -1,7 +1,5 @@
 use std::env;
 use dotenv::dotenv;
-use std::sync::Arc;
-
 use HTTP_Server::{
     http::{
         router::router::build_routes,

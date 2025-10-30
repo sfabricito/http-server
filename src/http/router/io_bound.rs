@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::http::{
     handler::{RequestHandlerStrategy, DispatcherBuilder},
-    router::router::{SimpleHandler, QueryParam},
+    router::router::{PooledHandler, QueryParam},
     request::HttpRequest,
-    response::{Response, OK},
+    response::{Response, OK, ACCEPTED, SERVICE_UNAVAILABLE},
     errors::ServerError,
 };
 
 use crate::jobs::{
+    best_effort::{self, BestEffortError, BestEffortOutcome},
     job::Priority,
     manager::JobManager,
 };
@@ -22,13 +24,22 @@ use crate::utils::{
         grep::grep_file,
         hash_file::hash_file,
         compress::compress_file
-    },    
-    timeout::run_with_timeout
+    },
 };
+
+use crate::worker_pool::ThreadPool;
 
 /// /sortfile?name=FILE&algo=merge|quick
 pub struct SortFileHandler {
     pub job_manager: Arc<JobManager>,
+}
+
+fn queue_full_response(retry_after_ms: u64) -> Response {
+    let retry_after_secs = ((retry_after_ms + 999) / 1000).max(1);
+    Response::new(SERVICE_UNAVAILABLE)
+        .set_header("Content-Type", "application/json")
+        .set_header("Retry-After", &retry_after_secs.to_string())
+        .with_body(format!("{{\"retry_after_ms\":{}}}", retry_after_ms))
 }
 
 impl RequestHandlerStrategy for SortFileHandler {
@@ -45,38 +56,61 @@ impl RequestHandlerStrategy for SortFileHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10_000);
 
-        let name_clone = name.to_string();
-        let algo_clone = algo.clone();
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("algo".into(), algo.clone());
 
-        if let Some((result, _total_elapsed)) = run_with_timeout(timeout_ms, move || sort_file(&name_clone, &algo_clone)) {
-            match result {
+        let file_name = name.to_string();
+        let algo_for_exec = algo.clone();
+
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "sortfile",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || match sort_file(&file_name, &algo_for_exec) {
                 Ok((out_path, count, elapsed)) => {
-                    let file = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-                    let json = format!(
+                    let sorted = out_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    Ok(format!(
                         "{{\"file\":\"{}\",\"algo\":\"{}\",\"sorted_file\":\"{}\",\"count\":{},\"elapsed_ms\":{}}}",
-                        name, algo, file, count, elapsed
-                    );
-                    Ok(Response::new(OK)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                        file_name, algo_for_exec, sorted, count, elapsed
+                    ))
                 }
-                Err(e) => Err(ServerError::Internal(format!("Sort failed: {}", e))),
+                Err(e) => Err(format!("Sort failed: {}", e)),
+            },
+        );
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("algo".into(), algo.clone());
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
 
-            let job_id = self.job_manager.submit("sortfile", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-            let json = format!(
-                "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, algo, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
         }
     }
 }
@@ -95,36 +129,63 @@ impl RequestHandlerStrategy for WordCountHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10_000);
 
-        let name_clone = name.to_string();
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
 
-        if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || word_count(&name_clone)) {
-            match result {
-                Ok((counts, elapsed, path)) => {
-                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-                    let json = format!(
-                        "{{\"file\":\"{}\",\"lines\":{},\"words\":{},\"bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
-                        filename, counts.lines, counts.words, counts.bytes, elapsed, total_elapsed
-                    );
-                    Ok(Response::new(OK)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
+        let file_name = name.to_string();
+
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "wordcount",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let total_start = Instant::now();
+                match word_count(&file_name) {
+                    Ok((counts, elapsed, path)) => {
+                        let filename = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let total_elapsed = total_start.elapsed().as_millis();
+                        Ok(format!(
+                            "{{\"file\":\"{}\",\"lines\":{},\"words\":{},\"bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            filename, counts.lines, counts.words, counts.bytes, elapsed, total_elapsed
+                        ))
+                    }
+                    Err(e) => Err(format!("Wordcount failed: {}", e)),
                 }
-                Err(e) => Err(ServerError::Internal(format!("Wordcount failed: {}", e))),
+            },
+        );
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
             }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.clone().to_string());
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
 
-            let job_id = self.job_manager.submit("wordcount", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
-
-            let json = format!(
-                "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
         }
     }
 }
@@ -145,41 +206,62 @@ impl RequestHandlerStrategy for GrepHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10_000);
 
-        let name_clone = name.to_string();
-        let pattern_clone = pattern.to_string();
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("pattern".into(), pattern.to_string());
 
-        if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || grep_file(&name_clone, &pattern_clone)) {
-            match result {
+        let file_name = name.to_string();
+        let pattern_value = pattern.to_string();
+
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "grep",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || match grep_file(&file_name, &pattern_value) {
                 Ok(res) => {
-                    let lines_json = res.matched_lines
+                    let lines_json = res
+                        .matched_lines
                         .iter()
                         .map(|l| format!("\"{}\"", l.replace('"', "\\\"")))
                         .collect::<Vec<_>>()
                         .join(",");
-                    let json = format!(
-                        "{{\"file\":\"{}\",\"pattern\":\"{}\",\"matches\":{},\"lines\":[{}],\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
-                        name, pattern, res.total_matches, lines_json, res.elapsed_ms, total_elapsed
-                    );
-                    Ok(Response::new(OK)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
+                    Ok(format!(
+                        "{{\"file\":\"{}\",\"pattern\":\"{}\",\"matches\":{},\"lines\":[{}],\"elapsed_ms\":{}}}",
+                        file_name, pattern_value, res.total_matches, lines_json, res.elapsed_ms
+                    ))
                 }
-                Err(e) => Err(ServerError::Internal(format!("Grep failed: {}", e))),
-            }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("pattern".into(), pattern.to_string());
-            let job_id = self.job_manager.submit("grep", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+                Err(e) => Err(format!("Grep failed: {}", e)),
+            },
+        );
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, pattern, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"pattern\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, pattern, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
         }
     }
 }
@@ -204,37 +286,66 @@ impl RequestHandlerStrategy for CompressHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20_000);
 
-        let name_clone = name.to_string();
-        let codec_clone = codec.to_string();
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("codec".into(), codec.to_string());
 
-        if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || compress_file(&name_clone, &codec_clone)) {
-            match result {
-                Ok(res) => {
-                    let out_name = res.output_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-                    let json = format!(
-                        "{{\"file\":\"{}\",\"codec\":\"{}\",\"output\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
-                        name, codec, out_name, res.compressed_size, res.elapsed_ms, total_elapsed
-                    );
-                    Ok(Response::new(OK)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
+        let file_name = name.to_string();
+        let codec_value = codec.to_string();
+
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "compress",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let total_start = Instant::now();
+                match compress_file(&file_name, &codec_value) {
+                    Ok(res) => {
+                        let out_name = res
+                            .output_file
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let total_elapsed = total_start.elapsed().as_millis();
+                        Ok(format!(
+                            "{{\"file\":\"{}\",\"codec\":\"{}\",\"output\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            file_name, codec_value, out_name, res.compressed_size, res.elapsed_ms, total_elapsed
+                        ))
+                    }
+                    Err(e) => Err(format!("Compression failed: {}", e)),
                 }
-                Err(e) => Err(ServerError::Internal(format!("Compression failed: {}", e))),
-            }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("codec".into(), codec.to_string());
-            let job_id = self.job_manager.submit("compress", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+            },
+        );
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, codec, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"codec\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, codec, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
         }
     }
 }
@@ -258,45 +369,101 @@ impl RequestHandlerStrategy for HashFileHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10_000);
 
-        let name_clone = name.to_string();
-        let algo_clone = algo.to_string();
+        let mut params = HashMap::new();
+        params.insert("name".into(), name.to_string());
+        params.insert("algo".into(), algo.to_string());
 
-        if let Some((result, total_elapsed)) = run_with_timeout(timeout_ms, move || hash_file(&name_clone, &algo_clone)) {
-            match result {
-                Ok(res) => {
-                    let json = format!(
-                        "{{\"file\":\"{}\",\"algorithm\":\"{}\",\"hash\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
-                        name, algo, res.hash_hex, res.file_size, res.elapsed_ms, total_elapsed
-                    );
-                    Ok(Response::new(OK)
-                        .set_header("Content-Type", "application/json")
-                        .with_body(json))
+        let file_name = name.to_string();
+        let algo_value = algo.to_string();
+
+        let outcome = best_effort::execute(
+            self.job_manager.clone(),
+            "hashfile",
+            params,
+            Priority::Normal,
+            Duration::from_millis(timeout_ms),
+            move || {
+                let total_start = Instant::now();
+                match hash_file(&file_name, &algo_value) {
+                    Ok(res) => {
+                        let total_elapsed = total_start.elapsed().as_millis();
+                        Ok(format!(
+                            "{{\"file\":\"{}\",\"algorithm\":\"{}\",\"hash\":\"{}\",\"size_bytes\":{},\"elapsed_ms\":{},\"total_elapsed_ms\":{}}}",
+                            file_name, algo_value, res.hash_hex, res.file_size, res.elapsed_ms, total_elapsed
+                        ))
+                    }
+                    Err(e) => Err(format!("Hashing failed: {}", e)),
                 }
-                Err(e) => Err(ServerError::Internal(format!("Hashing failed: {}", e))),
-            }
-        } else {
-            let mut params = HashMap::new();
-            params.insert("name".into(), name.to_string());
-            params.insert("algo".into(), algo.to_string());
-            let job_id = self.job_manager.submit("hashfile", params, Priority::Normal)
-                .map_err(|e| ServerError::Internal(format!("Job submit failed: {}", e)))?;
+            },
+        );
 
-            let json = format!(
-                "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
-                name, algo, timeout_ms, job_id
-            );
-            Ok(Response::new(OK)
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(BestEffortError::QueueFull { retry_after_ms }) => {
+                return Ok(queue_full_response(retry_after_ms));
+            }
+            Err(BestEffortError::HandlerFailed(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+            Err(BestEffortError::Internal(err)) => {
+                return Err(ServerError::Internal(err));
+            }
+        };
+
+        match outcome {
+            BestEffortOutcome::Completed(json) => Ok(Response::new(OK)
                 .set_header("Content-Type", "application/json")
-                .with_body(json))
+                .with_body(json)),
+            BestEffortOutcome::Offloaded { job_id } => {
+                let json = format!(
+                    "{{\"file\":\"{}\",\"algo\":\"{}\",\"status\":\"queued\",\"timeout_ms\":{},\"job_id\":\"{}\"}}",
+                    name, algo, timeout_ms, job_id
+                );
+                Ok(Response::new(ACCEPTED)
+                    .set_header("Content-Type", "application/json")
+                    .with_body(json))
+            }
         }
     }
 }
 
 pub fn register(builder: DispatcherBuilder, job_manager: Arc<JobManager>) -> DispatcherBuilder {
+    let sort_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(SortFileHandler { job_manager: job_manager.clone() });
+    let wordcount_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(WordCountHandler { job_manager: job_manager.clone() });
+    let grep_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(GrepHandler { job_manager: job_manager.clone() });
+    let compress_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(CompressHandler { job_manager: job_manager.clone() });
+    let hash_handler: Arc<dyn RequestHandlerStrategy> =
+        Arc::new(HashFileHandler { job_manager: job_manager.clone() });
+
+    let sort = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("sortfile", "WORKERS_SORTFILE", 2),
+        sort_handler,
+    ));
+    let wordcount = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("wordcount", "WORKERS_WORDCOUNT", 2),
+        wordcount_handler,
+    ));
+    let grep = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("grep", "WORKERS_GREP", 2),
+        grep_handler,
+    ));
+    let compress = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("compress", "WORKERS_COMPRESS", 2),
+        compress_handler,
+    ));
+    let hashfile = Arc::new(PooledHandler::new(
+        ThreadPool::from_env("hashfile", "WORKERS_HASHFILE", 2),
+        hash_handler,
+    ));
+
     builder
-        .get("/sortfile", Arc::new(SortFileHandler { job_manager: job_manager.clone() }))
-        .get("/wordcount", Arc::new(WordCountHandler { job_manager: job_manager.clone() }))
-        .get("/grep", Arc::new(GrepHandler { job_manager: job_manager.clone() }))
-        .get("/compress", Arc::new(CompressHandler { job_manager: job_manager.clone() }))
-        .get("/hashfile", Arc::new(HashFileHandler { job_manager }))
+        .get("/sortfile", sort)
+        .get("/wordcount", wordcount)
+        .get("/grep", grep)
+        .get("/compress", compress)
+        .get("/hashfile", hashfile)
 }

@@ -4,3 +4,4 @@ pub mod persistence;
 pub mod queue;
 pub mod workers;
 pub mod executables;
+pub mod best_effort;
