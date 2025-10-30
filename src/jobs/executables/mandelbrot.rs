@@ -18,14 +18,23 @@ pub fn run(params: &HashMap<String, String>) -> Result<String, String> {
         .unwrap_or(1000);
 
     if width == 0 || height == 0 {
-        return Err("Width and height must be greater than 0".into());
+        return Err("Width and height must be > 0".into());
     }
 
-    let ((map, elapsed_calc), _) = mandelbrot(width, height, max_iter, None);
+    // ✅ Correct destructuring: mandelbrot returns (map, elapsed)
+    let (map, elapsed_calc) = mandelbrot(width, height, max_iter, None);
 
     let rows_json = map
         .iter()
-        .map(|row| format!("[{}]", row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")))
+        .map(|row| {
+            format!(
+                "[{}]",
+                row.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
 

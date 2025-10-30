@@ -1,5 +1,6 @@
 pub mod is_prime;
 pub mod factor;
+pub mod pi;
 pub mod matrixmul;
 pub mod mandelbrot;
 

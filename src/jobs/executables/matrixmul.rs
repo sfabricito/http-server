@@ -16,9 +16,10 @@ pub fn run(params: &HashMap<String, String>) -> Result<String, String> {
         return Err("Matrix size must be between 1 and 1000".into());
     }
 
-    let ((hash, elapsed_calc), total_elapsed) = matrixmul(size, seed);
+    let (hash, elapsed_calc) = matrixmul(size, seed);
+
     Ok(format!(
-        "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}, \"total_elapsed_ms\": {}}}",
-        size, seed, hash, elapsed_calc, total_elapsed
+        "{{\"size\": {}, \"seed\": {}, \"result_sha256\": \"{}\", \"elapsed_ms\": {}}}",
+        size, seed, hash, elapsed_calc
     ))
 }
