@@ -9,7 +9,6 @@ pub fn to_upper(text: &str) -> String {
 
 pub fn help() -> String {
     let commands = [
-        // --- CPU-bound endpoints ---
         "/isprime?n=NUM",
         "/factor?n=NUM",
         "/pi?digits=D",
