@@ -9,19 +9,36 @@ pub fn to_upper(text: &str) -> String {
 
 pub fn help() -> String {
     let commands = [
-        "/fibonacci?num=N",
+        // --- CPU-bound endpoints ---
+        "/isprime?n=NUM",
+        "/factor?n=NUM",
+        "/pi?digits=D",
+        "/matrixmul?size=N&seed=S",
+        "/mandelbrot?width=W&height=H&max_iter=I",
+
+        // --- IO-bound endpoints ---
         "/createfile?name=filename&content=text&repeat=x",
         "/deletefile?name=filename",
-        "/status",
+        "/random?count=n&min=a&max=b",
+        "/sleep?seconds=s",
+        "/timestamp",
+
+        // --- Command / Utility endpoints ---
+        "/fibonacci?num=N",
         "/reverse?text=abcdef",
         "/toupper?text=abcd",
-        "/random?count=n&min=a&max=b",
-        "/timestamp",
         "/hash?text=someinput",
         "/simulate?seconds=s&task=name",
-        "/sleep?seconds=s",
         "/loadtest?tasks=n&sleep=x",
+        "/status",
         "/help",
+
+        // --- Job system endpoints ---
+        "/jobs/submit?task=TASK&<params>",
+        "/jobs/cancel?id=JOBID",
+        "/jobs/result?id=JOBID",
+        "/jobs/status?id=JOBID",
+        "/metrics",
     ];
 
     let mut output = String::from("Available commands:\n");
